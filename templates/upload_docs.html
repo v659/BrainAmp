@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Upload Documents</title>
+
+    <style>
+        :root {
+            --primary: #2563eb;
+            --primary-dark: #1e40af;
+            --bg: #f9fafb;
+            --card: #ffffff;
+            --text-main: #111827;
+            --text-muted: #6b7280;
+            --border: #e5e7eb;
+            --soft: #eef2ff;
+            --danger: #dc3545;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            height: 100vh;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-main);
+        }
+
+        /* ---------- BACK ---------- */
+
+        .go-back-btn {
+            position: absolute;
+            top: 24px;
+            right: 32px;
+            padding: 10px 18px;
+            font-size: 14px;
+            cursor: pointer;
+            background: var(--primary);
+            color: white;
+            border: none;
+            border-radius: 10px;
+        }
+
+        .go-back-btn:hover {
+            background: var(--primary-dark);
+        }
+
+        /* ---------- CARD ---------- */
+
+        .upload-card {
+            background: var(--card);
+            width: 520px;
+            padding: 36px;
+            border-radius: 18px;
+            border: 1px solid var(--border);
+            box-shadow: 0 20px 40px rgba(0,0,0,0.08);
+        }
+
+        .upload-card h1 {
+            margin: 0 0 12px;
+            font-size: 1.8rem;
+            letter-spacing: -0.02em;
+        }
+
+        .upload-card p {
+            margin: 0 0 28px;
+            color: var(--text-muted);
+            font-size: 14px;
+            line-height: 1.6;
+        }
+
+        /* ---------- FILE INPUT ---------- */
+
+        .file-input {
+            width: 100%;
+            padding: 16px;
+            border: 2px dashed var(--border);
+            border-radius: 14px;
+            cursor: pointer;
+            font-size: 14px;
+            background: #fafafa;
+            margin-bottom: 16px;
+            text-align: center;
+            transition: border-color 0.15s ease, background 0.15s ease;
+        }
+
+        .file-input:hover {
+            border-color: var(--primary);
+            background: var(--soft);
+        }
+
+        /* ---------- FILE LIST ---------- */
+
+        .file-list {
+            text-align: left;
+            max-height: 220px;
+            overflow-y: auto;
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 10px;
+            background: #fafafa;
+        }
+
+        .file-item {
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border);
+            font-size: 13px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .file-item:last-child {
+            border-bottom: none;
+        }
+
+        .remove-btn {
+            background: var(--danger);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            padding: 4px 10px;
+            font-size: 12px;
+            cursor: pointer;
+        }
+
+        /* ---------- META ---------- */
+
+        .file-count {
+            font-size: 13px;
+            color: var(--text-muted);
+            margin-top: 10px;
+            text-align: center;
+        }
+
+        /* ---------- ACTIONS ---------- */
+
+        .button-row {
+            display: flex;
+            gap: 12px;
+            margin-top: 22px;
+        }
+
+        .upload-btn {
+            flex: 1;
+            padding: 14px;
+            font-size: 14px;
+            cursor: pointer;
+            background: var(--primary);
+            color: white;
+            border: none;
+            border-radius: 12px;
+        }
+
+        .upload-btn:hover {
+            background: var(--primary-dark);
+        }
+
+        .upload-btn:disabled {
+            background: #cbd5e1;
+            cursor: not-allowed;
+        }
+
+        .clear-btn {
+            flex: 1;
+            padding: 14px;
+            font-size: 14px;
+            cursor: pointer;
+            background: white;
+            color: var(--primary);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+        }
+
+        .clear-btn:hover {
+            background: var(--soft);
+        }
+    </style>
+</head>
+
+<body>
+
+<button class="go-back-btn" onclick="location.href='/dashboard'">Back</button>
+
+<div class="upload-card">
+    <h1>Upload documents</h1>
+    <p>
+        Add PDFs, text files, or notes. Brain amp will use these to explain concepts
+        from fundamentals.
+    </p>
+
+    <input
+        class="file-input"
+        type="file"
+        multiple
+        id="fileInput"
+        onchange="updateFileList()"
+    >
+
+    <div id="fileList" class="file-list"></div>
+    <div id="fileCount" class="file-count"></div>
+
+    <div class="button-row">
+        <button class="upload-btn" onclick="uploadFile()" id="uploadBtn" disabled>
+            Upload
+        </button>
+        <button class="clear-btn" onclick="clearAllFiles()">
+            Clear all
+        </button>
+    </div>
+</div>
+<script src="/static/script.js"></script>
+<script>
+    let currentFiles = [];
+
+    function updateFileList() {
+        const fileInput = document.getElementById('fileInput');
+        const fileList = document.getElementById('fileList');
+        const fileCount = document.getElementById('fileCount');
+        const uploadBtn = document.getElementById('uploadBtn');
+
+        const newFiles = Array.from(fileInput.files);
+        const existingKeys = new Set(currentFiles.map(f => f.name + f.size + f.lastModified));
+
+        newFiles.forEach(file => {
+            const key = file.name + file.size + file.lastModified;
+            if (!existingKeys.has(key)) currentFiles.push(file);
+        });
+
+        const dt = new DataTransfer();
+        currentFiles.forEach(f => dt.items.add(f));
+        fileInput.files = dt.files;
+
+        if (currentFiles.length === 0) {
+            fileList.innerHTML = `<div class="file-item">No files selected</div>`;
+            fileCount.textContent = '';
+            uploadBtn.disabled = true;
+            return;
+        }
+
+        uploadBtn.disabled = false;
+        fileCount.textContent = `${currentFiles.length} file(s) selected`;
+
+        fileList.innerHTML = currentFiles.map((file, i) => `
+            <div class="file-item">
+                <span>${i + 1}. ${file.name} (${(file.size / 1024).toFixed(1)} KB)</span>
+                <button class="remove-btn" onclick="removeFile(${i})">Remove</button>
+            </div>
+        `).join('');
+    }
+
+    function removeFile(index) {
+        currentFiles.splice(index, 1);
+        const dt = new DataTransfer();
+        currentFiles.forEach(f => dt.items.add(f));
+        document.getElementById('fileInput').files = dt.files;
+        updateFileList();
+    }
+
+    function clearAllFiles() {
+        currentFiles = [];
+        document.getElementById('fileInput').files = new DataTransfer().files;
+        updateFileList();
+    }
+
+    document.addEventListener('DOMContentLoaded', updateFileList);
+</script>
+
+</body>
+</html>

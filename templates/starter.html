@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Brain amp — Understand the Fundamentals</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        :root {
+            --primary: #2563eb;
+            --primary-dark: #1e40af;
+            --bg: #f9fafb;
+            --card: #ffffff;
+            --text-main: #111827;
+            --text-muted: #6b7280;
+            --border: #e5e7eb;
+            --soft: #eef2ff;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+            color: var(--text-main);
+            background: var(--bg);
+        }
+
+        section { padding: 70px 24px; }
+
+        .container {
+            max-width: 1100px;
+            margin: 0 auto;
+        }
+
+        h1, h2, h3 { letter-spacing: -0.02em; }
+        p { color: var(--text-muted); line-height: 1.7; }
+
+
+        header {
+            min-height: 70vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: radial-gradient(circle at top, #eef2ff, #f9fafb);
+            padding: 60px 24px;
+            text-align: center;
+        }
+
+        .hero {
+            max-width: 900px;
+        }
+
+        .hero h1 {
+            font-size: 3rem;
+            margin-bottom: 16px;
+        }
+
+        .hero p {
+            font-size: 1.15rem;
+            max-width: 720px;
+            margin: 0 auto 36px;
+        }
+
+        .cta {
+            display: flex;
+            gap: 16px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        button {
+            padding: 14px 32px;
+            font-size: 15px;
+            border-radius: 10px;
+            cursor: pointer;
+            border: none;
+            font-weight: 500;
+            transition: all 0.15s ease;
+        }
+
+        .btn-primary {
+            background: var(--primary);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: var(--primary-dark);
+            transform: translateY(-1px);
+        }
+
+        .btn-secondary {
+            background: white;
+            color: var(--primary);
+            border: 1px solid var(--border);
+        }
+
+        section:first-of-type {
+            padding-top: 40px;
+        }
+
+
+        .process {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 28px;
+            margin-top: 40px;
+            position: relative;
+        }
+
+        .step {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 28px;
+            text-align: left;
+        }
+
+        .step-number {
+            width: 36px;
+            height: 36px;
+            border-radius: 10px;
+            background: var(--soft);
+            color: var(--primary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            margin-bottom: 14px;
+        }
+
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 28px;
+            margin-top: 40px;
+        }
+
+        .card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 28px;
+        }
+
+        .icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 12px;
+            background: var(--soft);
+            color: var(--primary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            margin-bottom: 14px;
+        }
+
+
+        .pricing-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 28px;
+            margin-top: 50px;
+        }
+
+        .plan {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 18px;
+            padding: 32px;
+            text-align: center;
+        }
+
+        .plan.pro {
+            border: 2px solid var(--primary);
+            transform: translateY(-6px);
+            box-shadow: 0 20px 40px rgba(37,99,235,0.15);
+        }
+
+        .price {
+            font-size: 2rem;
+            font-weight: 600;
+            color: var(--primary);
+            margin: 10px 0;
+        }
+
+        ul {
+            list-style: none;
+            padding: 0;
+            margin: 24px 0;
+            text-align: left;
+        }
+
+        li {
+            margin-bottom: 10px;
+            font-size: 14.5px;
+        }
+
+        li::before {
+            content: "✓ ";
+            color: var(--primary);
+            font-weight: 600;
+        }
+
+        footer {
+            border-top: 1px solid var(--border);
+            padding: 30px 24px;
+            text-align: center;
+            font-size: 13px;
+            color: var(--text-muted);
+        }
+    </style>
+</head>
+<body>
+
+<header>
+    <div class="hero">
+        <h1>Understand the fundamentals.<br>At your own pace.</h1>
+        <p>
+            Brain amp is a 24/7 AI tutor that explains your own notes from first principles,
+            adapts to how you learn, and helps you build real understanding — not memorization.
+        </p>
+
+        <div class="cta">
+            <button class="btn-primary" onclick="location.href='/signup'">Get Started</button>
+            <button class="btn-secondary" onclick="location.href='/login'">Log In</button>
+        </div>
+    </div>
+</header>
+
+<section>
+    <div class="container">
+        <h2>How it works</h2>
+
+        <div class="process">
+            <div class="step">
+                <div class="step-number">1</div>
+                <h3>Upload your notes</h3>
+                <p>Upload PDFs, documents, or text notes from school, coaching, or self-study.</p>
+            </div>
+
+            <div class="step">
+                <div class="step-number">2</div>
+                <h3>Ask questions</h3>
+                <p>Chat with an AI tutor that understands your material and your context.</p>
+            </div>
+
+            <div class="step">
+                <div class="step-number">3</div>
+                <h3>Learn from fundamentals</h3>
+                <p>Concepts are broken down step-by-step, adjusted to your learning pace.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section>
+    <div class="container">
+        <h2>Why Brain amp?</h2>
+        <div class="grid">
+            <div class="card">
+                <div class="icon">A</div>
+                <h3>Built for understanding</h3>
+                <p>We focus on fundamentals, not shortcuts or copied answers.</p>
+            </div>
+            <div class="card">
+                <div class="icon">24/7</div>
+                <h3>Always available</h3>
+                <p>No scheduling, no pressure — learn anytime, anywhere.</p>
+            </div>
+            <div class="card">
+                <div class="icon">$</div>
+                <h3>Affordable</h3>
+                <p>$5/month instead of $50/hour for a tutor.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section>
+    <div class="container">
+        <h2>Pricing</h2>
+        <p>Simple limits designed to keep costs low and learning effective.</p>
+
+        <div class="pricing-grid">
+            <div class="plan">
+                <h3>Free</h3>
+                <div class="price">$0</div>
+                <ul>
+                    <li>5 messages per day</li>
+                    <li>2 notes per month</li>
+                    <li>Up to 5 KB per note (~2 pages)</li>
+                </ul>
+                <button class="btn-secondary" onclick="location.href='/signup'">Try Free</button>
+            </div>
+
+            <div class="plan pro">
+                <h3>Pro</h3>
+                <div class="price">$5 / month</div>
+                <ul>
+                    <li>30 messages per day</li>
+                    <li>20 notes per month</li>
+                </ul>
+                <button class="btn-primary" onclick="location.href='/signup'">Go Pro</button>
+            </div>
+
+            <div class="plan">
+                <h3>Max</h3>
+                <div class="price">$20 / month</div>
+                <ul>
+                    <li>100 messages per day</li>
+                    <li>60 notes per month</li>
+                </ul>
+                <button class="btn-primary" onclick="location.href='/signup'">Get Max</button>
+            </div>
+        </div>
+    </div>
+</section>
+
+<footer>
+    Created by Arjun Agarwal
+</footer>
+
+</body>
+</html>
