@@ -6,6 +6,10 @@ const CONFIG = {
     MAX_MESSAGE_LENGTH: 2000,
     REQUEST_TIMEOUT: 30000, // 30 seconds
 };
+const DEFAULT_SUBJECT_PRESETS = [
+    "Biology", "History", "Geography", "English", "Math",
+    "Computer Science", "Languages", "Physics", "Chemistry", "Economics", "Other"
+];
 
 // Utility Functions
 function validateEmail(email) {
@@ -407,7 +411,10 @@ async function uploadFile() {
 async function get_usersAndtopic(api) {
     const token = localStorage.getItem("access_token");
     if (!token) {
-        window.location.href = "/dashboard";
+        const container = document.getElementById("topics-container");
+        if (container) {
+            container.innerHTML = `<div style="padding:20px;text-align:center;color:#dc2626;">Not logged in. Please log in again.</div>`;
+        }
         return;
     }
 
@@ -427,7 +434,17 @@ async function get_usersAndtopic(api) {
 
         container.innerHTML = "";
 
-        if (!data.result_topics || data.result_topics.length === 0) {
+        let topics = data.topics;
+        if (!topics && Array.isArray(data.result_topics)) {
+            topics = data.result_topics.map((t, i) => ({
+                topic: t.topic,
+                content: data.result_content?.[i]?.content || "",
+                subject: "Uncategorized",
+                created_at: null
+            }));
+        }
+
+        if (!topics || topics.length === 0) {
             container.innerHTML = `
                 <div style="padding: 20px; text-align: center; color: #999;">
                     No topics yet. Upload a document to get started!
@@ -436,58 +453,78 @@ async function get_usersAndtopic(api) {
             return;
         }
 
-        data.result_topics.forEach((topicObj, index) => {
-            const topic = topicObj.topic || "Untitled";
-            const content = data.result_content[index]?.content || "No content available";
+        const grouped = {};
+        topics.forEach((topicObj) => {
+            const subject = topicObj.subject || "Uncategorized";
+            if (!grouped[subject]) grouped[subject] = [];
+            grouped[subject].push(topicObj);
+        });
 
-            const wrapper = document.createElement("div");
-            wrapper.style.cssText = `
+        Object.keys(grouped).sort().forEach(subject => {
+            const sectionTitle = document.createElement("h3");
+            sectionTitle.textContent = subject;
+            sectionTitle.style.cssText = `
                 width: 80%;
-                margin: 12px auto;
-                border-radius: 8px;
-                background: #fff;
-                box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+                margin: 20px auto 8px auto;
+                font-size: 1rem;
+                color: #374151;
             `;
+            container.appendChild(sectionTitle);
 
-            const button = document.createElement("button");
-            button.textContent = topic;
-            button.style.cssText = `
-                width: 100%;
-                padding: 14px;
-                font-size: 1.1rem;
-                text-align: left;
-                border: none;
-                background: transparent;
-                cursor: pointer;
-                font-weight: 600;
-            `;
+            grouped[subject].forEach((topicObj) => {
+                const topic = topicObj.topic || "Untitled";
+                const content = topicObj.content || "No content available";
+                const createdAt = topicObj.created_at ? new Date(topicObj.created_at).toLocaleDateString() : "Unknown date";
 
-            const contentDiv = document.createElement("div");
-            contentDiv.style.cssText = `
-                display: none;
-                padding: 14px;
-                border-top: 1px solid #ddd;
-            `;
+                const wrapper = document.createElement("div");
+                wrapper.style.cssText = `
+                    width: 80%;
+                    margin: 10px auto;
+                    border-radius: 8px;
+                    background: #fff;
+                    box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+                `;
 
-            const pre = document.createElement("pre");
-            pre.textContent = content;
-            pre.style.cssText = `
-                white-space: pre-wrap;
-                margin: 0;
-                max-height: 400px;
-                overflow-y: auto;
-            `;
+                const button = document.createElement("button");
+                button.textContent = `${topic} (${createdAt})`;
+                button.style.cssText = `
+                    width: 100%;
+                    padding: 14px;
+                    font-size: 1rem;
+                    text-align: left;
+                    border: none;
+                    background: transparent;
+                    cursor: pointer;
+                    font-weight: 600;
+                `;
 
-            contentDiv.appendChild(pre);
+                const contentDiv = document.createElement("div");
+                contentDiv.style.cssText = `
+                    display: none;
+                    padding: 14px;
+                    border-top: 1px solid #ddd;
+                `;
 
-            button.onclick = () => {
-                const isOpen = contentDiv.style.display === "block";
-                contentDiv.style.display = isOpen ? "none" : "block";
-            };
+                const pre = document.createElement("pre");
+                pre.textContent = content;
+                pre.style.cssText = `
+                    white-space: pre-wrap;
+                    margin: 0;
+                    max-height: 400px;
+                    overflow-y: auto;
+                `;
 
-            wrapper.appendChild(button);
-            wrapper.appendChild(contentDiv);
-            container.appendChild(wrapper);
+                contentDiv.appendChild(pre);
+
+                button.onclick = () => {
+                    const isOpen = contentDiv.style.display === "block";
+                    contentDiv.style.display = isOpen ? "none" : "block";
+                };
+
+                wrapper.appendChild(button);
+                wrapper.appendChild(contentDiv);
+                container.appendChild(wrapper);
+            });
         });
 
     } catch (err) {
@@ -503,9 +540,125 @@ async function get_usersAndtopic(api) {
     }
 }
 
+async function loadSubjectPresets() {
+    const token = localStorage.getItem("access_token");
+    const listDiv = document.getElementById("subject-preset-list");
+    if (!listDiv) return;
+    if (!token) {
+        listDiv.innerHTML = `<div style="color:#dc2626;padding:8px 0;">Not logged in.</div>`;
+        return;
+    }
+
+    try {
+        const res = await fetch("/api/subject-presets", {
+            headers: { "Authorization": "Bearer " + token }
+        });
+        if (!res.ok) throw new Error("Failed to load subject presets");
+        const data = await res.json();
+        const presets = data.presets || [];
+
+        listDiv.innerHTML = "";
+        if (presets.length === 0) {
+            listDiv.innerHTML = `<div style="color:#6b7280;padding:8px 0;">No presets found</div>`;
+            return;
+        }
+
+        presets.forEach((preset, index) => {
+            const row = document.createElement("div");
+            row.style.cssText = "display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #eee;";
+
+            const name = document.createElement("span");
+            name.textContent = preset.subject;
+            row.appendChild(name);
+
+            if (preset.id) {
+                const controls = document.createElement("div");
+                controls.style.cssText = "display:flex;gap:6px;";
+                const upBtn = document.createElement("button");
+                upBtn.textContent = "Up";
+                upBtn.style.cssText = "padding:6px 10px;cursor:pointer;";
+                upBtn.disabled = index === 0;
+                upBtn.onclick = () => reorderSubjectPreset(index, -1, presets);
+
+                const downBtn = document.createElement("button");
+                downBtn.textContent = "Down";
+                downBtn.style.cssText = "padding:6px 10px;cursor:pointer;";
+                downBtn.disabled = index === presets.length - 1;
+                downBtn.onclick = () => reorderSubjectPreset(index, 1, presets);
+
+                controls.appendChild(upBtn);
+                controls.appendChild(downBtn);
+                row.appendChild(controls);
+            }
+
+            listDiv.appendChild(row);
+        });
+    } catch (err) {
+        console.error("Load subject presets error:", err);
+        listDiv.innerHTML = DEFAULT_SUBJECT_PRESETS.map(name =>
+            `<div style="padding:8px 0;border-bottom:1px solid #eee;">${sanitizeInput(name)}</div>`
+        ).join('');
+    }
+}
+
+async function addSubjectPreset() {
+    const token = localStorage.getItem("access_token");
+    const input = document.getElementById("new-subject-input");
+    if (!token || !input) return;
+
+    const subject = input.value.trim();
+    if (!subject) return;
+
+    try {
+        const res = await fetch("/api/subject-presets", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Authorization": "Bearer " + token
+            },
+            body: JSON.stringify({ subject })
+        });
+        if (!res.ok) throw new Error("Failed to add subject preset");
+        input.value = "";
+        await loadSubjectPresets();
+    } catch (err) {
+        console.error("Add subject preset error:", err);
+        alert("Failed to add subject preset");
+    }
+}
+
+async function reorderSubjectPreset(index, direction, presets) {
+    const token = localStorage.getItem("access_token");
+    if (!token) return;
+    const target = index + direction;
+    if (target < 0 || target >= presets.length) return;
+
+    const cloned = [...presets];
+    const [moved] = cloned.splice(index, 1);
+    cloned.splice(target, 0, moved);
+    const presetIds = cloned.map(p => p.id).filter(Boolean);
+
+    try {
+        const res = await fetch("/api/subject-presets/reorder", {
+            method: "PUT",
+            headers: {
+                "Content-Type": "application/json",
+                "Authorization": "Bearer " + token
+            },
+            body: JSON.stringify({ preset_ids: presetIds })
+        });
+        if (!res.ok) throw new Error("Failed to reorder");
+        await loadSubjectPresets();
+    } catch (err) {
+        console.error("Reorder subject presets error:", err);
+        alert("Failed to reorder subject presets");
+    }
+}
+
 // Chat Functions
 let currentTopicId = null;
 let currentChatId = null;
+let currentSubject = null;
 
 async function loadChatTopics() {
     const token = localStorage.getItem("access_token");
@@ -515,30 +668,21 @@ async function loadChatTopics() {
     }
 
     try {
-        const res = await fetch("/api/chat/topics", {
+        const res = await fetch("/api/subject-presets", {
             headers: { "Authorization": "Bearer " + token }
         });
 
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
         const data = await res.json();
+        const presets = data.presets || [];
         const container = document.getElementById("topics-container");
 
         if (!container) return;
 
         container.innerHTML = "";
 
-        if (!data.topics || data.topics.length === 0) {
-            container.innerHTML = `
-                <div class="empty-state">
-                    <h2>No topics yet</h2>
-                    <p>Upload a document to start chatting with your AI tutor</p>
-                </div>
-            `;
-            return;
-        }
-
-        // Create topic selection UI
+        // Create optional subject selection UI
         const topicSelect = document.createElement("select");
         topicSelect.id = "topic-select";
         topicSelect.style.cssText = `
@@ -552,18 +696,19 @@ async function loadChatTopics() {
 
         const defaultOption = document.createElement("option");
         defaultOption.value = "";
-        defaultOption.textContent = "Select a topic...";
+        defaultOption.textContent = "Auto-detect subject from my message";
         topicSelect.appendChild(defaultOption);
 
-        data.topics.forEach(topic => {
+        presets.forEach(preset => {
             const option = document.createElement("option");
-            option.value = topic.id;
-            option.textContent = topic.topic;
+            option.value = preset.subject;
+            option.textContent = preset.subject;
             topicSelect.appendChild(option);
         });
 
         topicSelect.onchange = (e) => {
-            currentTopicId = e.target.value;
+            currentSubject = e.target.value || null;
+            currentTopicId = null;
             currentChatId = null;
             clearChat();
         };
@@ -590,7 +735,7 @@ async function loadChatTopics() {
 
         const chatInput = document.createElement("textarea");
         chatInput.id = "chat-input";
-        chatInput.placeholder = "Type your message...";
+        chatInput.placeholder = "Type your message (you can mention subject in text, or use date range like from 2026-01-01 to 2026-01-15)...";
         chatInput.maxLength = CONFIG.MAX_MESSAGE_LENGTH;
         chatInput.style.cssText = `
             flex: 1;
@@ -682,11 +827,6 @@ async function sendMessage() {
         return;
     }
 
-    if (!currentTopicId) {
-        alert("Please select a topic first");
-        return;
-    }
-
     const token = localStorage.getItem("access_token");
     if (!token) {
         window.location.href = "/";
@@ -705,13 +845,15 @@ async function sendMessage() {
             },
             body: JSON.stringify({
                 topic_id: currentTopicId,
+                subject: currentSubject,
                 chat_id: currentChatId,
                 message: message
             })
         });
 
         if (!response.ok) {
-            throw new Error("Failed to send message");
+            const errorData = await response.json();
+            throw new Error(errorData.detail || "Failed to send message");
         }
 
         const data = await response.json();
@@ -902,6 +1044,7 @@ function toggleChatSidebar() {
 function startNewChat() {
     currentChatId = null;
     currentTopicId = null;
+    currentSubject = null;
     clearChat();
     loadChatTopics();
 }
@@ -915,21 +1058,20 @@ async function loadAllChats() {
     }
 
     try {
-        const topicsRes = await fetch("/api/chat/topics", {
+        const chatsRes = await fetch("/api/chat/list-all", {
             headers: { "Authorization": "Bearer " + token }
         });
 
-        if (!topicsRes.ok) return;
-
-        const topicsData = await topicsRes.json();
-        const topics = topicsData.topics || [];
+        if (!chatsRes.ok) return;
+        const chatsData = await chatsRes.json();
+        const chats = chatsData.chats || [];
         const chatListDiv = document.getElementById("chat-list");
 
         if (!chatListDiv) return;
 
         chatListDiv.innerHTML = "";
 
-        if (topics.length === 0) {
+        if (chats.length === 0) {
             chatListDiv.innerHTML = `
                 <div style="padding: 20px; text-align: center; color: #999;">
                     No chats yet.<br>Upload a document to get started!
@@ -938,34 +1080,23 @@ async function loadAllChats() {
             return;
         }
 
-        for (const topic of topics) {
-            const chatsRes = await fetch(`/api/chat/list/${topic.id}`, {
-                headers: { "Authorization": "Bearer " + token }
-            });
+        chats.forEach(chat => {
+            const chatItem = document.createElement("div");
+            chatItem.className = "chat-item";
+            chatItem.onclick = (e) => loadChatById(chat.chat_id, chat.topic_id, e);
 
-            if (chatsRes.ok) {
-                const chatsData = await chatsRes.json();
-                const chats = chatsData.chats || [];
+            const displayTitle = chat.chat_title || chat.topic_name || "Chat session";
+            const previewText = chat.topic_name || "Chat session";
+            const createdAt = chat.created_at ? new Date(chat.created_at).toLocaleString() : "Click to load";
 
-                chats.forEach(chat => {
-                    const chatItem = document.createElement("div");
-                    chatItem.className = "chat-item";
-                    chatItem.onclick = () => loadChatById(chat.chat_id, topic.id);
+            chatItem.innerHTML = `
+                <div class="chat-item-title">${sanitizeInput(displayTitle)}</div>
+                <div class="chat-item-preview">${sanitizeInput(previewText)}</div>
+                <div class="chat-item-time">${sanitizeInput(createdAt)}</div>
+            `;
 
-                    // Use chat_title if available, otherwise show topic name
-                    const displayTitle = chat.chat_title || topic.topic;
-                    const previewText = chat.chat_title ? topic.topic : "Chat session";
-
-                    chatItem.innerHTML = `
-                        <div class="chat-item-title">${sanitizeInput(displayTitle)}</div>
-                        <div class="chat-item-preview">${sanitizeInput(previewText)}</div>
-                        <div class="chat-item-time">Click to load</div>
-                    `;
-
-                    chatListDiv.appendChild(chatItem);
-                });
-            }
-        }
+            chatListDiv.appendChild(chatItem);
+        });
 
         if (chatListDiv.children.length === 0) {
             chatListDiv.innerHTML = `
@@ -979,20 +1110,26 @@ async function loadAllChats() {
     }
 }
 
-async function loadChatById(chatId, topicId) {
+async function loadChatById(chatId, topicId, eventObj = null) {
     currentChatId = chatId;
-    currentTopicId = topicId;
+    currentTopicId = topicId || null;
+    currentSubject = null;
 
     document.querySelectorAll('.chat-item').forEach(item => {
         item.classList.remove('active');
     });
 
-    if (event && event.currentTarget) {
-        event.currentTarget.classList.add('active');
+    if (eventObj && eventObj.currentTarget) {
+        eventObj.currentTarget.classList.add('active');
     }
 
     if (!document.getElementById("chat-messages")) {
         await loadChatTopics();
+    }
+
+    const topicSelect = document.getElementById("topic-select");
+    if (topicSelect) {
+        topicSelect.value = "";
     }
 
     await loadChatHistory(chatId);

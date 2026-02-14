@@ -4,6 +4,8 @@ from typing import Optional, List
 from datetime import datetime, timedelta
 import tempfile
 import uuid
+import re
+import json
 
 from fastapi import FastAPI, Request, Header, HTTPException, Depends, UploadFile, File, status
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -47,6 +49,18 @@ class Config:
 
 
 config = Config()
+DEFAULT_SUBJECT_PRESETS = [
+    "Biology",
+    "History",
+    "Geography",
+    "English",
+    "Math",
+    "Computer Science",
+    "Languages",
+    "Physics",
+    "Chemistry",
+    "Economics",
+]
 
 # Validate configuration
 if not all([config.SUPABASE_URL, config.SUPABASE_ANON_KEY, config.OPENAI_API_KEY]):
@@ -105,6 +119,7 @@ class SignupData(BaseModel):
 class ChatMessage(BaseModel):
     topic_id: Optional[str] = Field(None, max_length=100)
     chat_id: Optional[str] = Field(None, max_length=100)
+    subject: Optional[str] = Field(None, max_length=60)
     message: str = Field(..., min_length=1, max_length=2000)
 
 
@@ -121,6 +136,211 @@ class AddSourceData(BaseModel):
         if not '.' in v or ' ' in v:
             raise ValueError('Invalid domain format')
         return v
+
+
+class SubjectPresetData(BaseModel):
+    subject: str = Field(..., min_length=2, max_length=60)
+
+
+class SubjectPresetOrderData(BaseModel):
+    preset_ids: List[str] = Field(..., min_items=1)
+
+
+def normalize_subject(subject: str) -> str:
+    return re.sub(r"\s+", " ", subject.strip()).title()
+
+
+def try_parse_date(date_text: str) -> Optional[datetime]:
+    cleaned = re.sub(r'(\d)(st|nd|rd|th)', r'\1', date_text.strip(), flags=re.IGNORECASE)
+    formats = [
+        "%Y-%m-%d",
+        "%m/%d/%Y",
+        "%m/%d/%y",
+        "%B %d, %Y",
+        "%b %d, %Y",
+        "%B %d %Y",
+        "%b %d %Y"
+    ]
+    for fmt in formats:
+        try:
+            return datetime.strptime(cleaned, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def parse_date_range_from_message(message: str) -> Optional[tuple[datetime, datetime]]:
+    match = re.search(r'from\s+(.+?)\s+to\s+(.+?)(?:[\.\!\?]|$)', message, flags=re.IGNORECASE)
+    if not match:
+        return None
+
+    start_dt = try_parse_date(match.group(1))
+    end_dt = try_parse_date(match.group(2))
+
+    if not start_dt or not end_dt:
+        return None
+    if end_dt < start_dt:
+        start_dt, end_dt = end_dt, start_dt
+
+    start_dt = start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_exclusive = end_dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    return start_dt, end_exclusive
+
+
+def get_subject_presets_for_user(user_id: str) -> List[str]:
+    try:
+        result = supabase.table("subject_presets").select("subject").eq("user_id", user_id).order("position",
+                                                                                                    desc=False).execute()
+        subjects = [normalize_subject(row["subject"]) for row in (result.data or []) if row.get("subject")]
+        if subjects:
+            return subjects
+    except Exception as e:
+        logger.warning(f"Failed to load subject presets for user {user_id}: {e}")
+    return DEFAULT_SUBJECT_PRESETS
+
+
+def ensure_subject_presets_seeded(user_id: str) -> List[dict]:
+    try:
+        existing = supabase.table("subject_presets").select("id, subject, position").eq("user_id", user_id).order(
+            "position", desc=False).execute()
+    except Exception:
+        # Backward compatibility if `position` column is not present yet.
+        existing = supabase.table("subject_presets").select("id, subject").eq("user_id", user_id).execute()
+    if existing.data:
+        normalized = []
+        for idx, row in enumerate(existing.data):
+            normalized.append({
+                "id": row.get("id"),
+                "subject": row.get("subject"),
+                "position": row.get("position", idx)
+            })
+        return normalized
+
+    rows = [
+        {"user_id": user_id, "subject": subject, "position": idx}
+        for idx, subject in enumerate(DEFAULT_SUBJECT_PRESETS)
+    ]
+    try:
+        supabase.table("subject_presets").insert(rows).execute()
+        seeded = supabase.table("subject_presets").select("id, subject, position").eq("user_id", user_id).order(
+            "position", desc=False).execute()
+        return seeded.data or []
+    except Exception:
+        # Backward compatibility if table does not support `position`.
+        fallback_rows = [{"user_id": user_id, "subject": subject} for subject in DEFAULT_SUBJECT_PRESETS]
+        supabase.table("subject_presets").insert(fallback_rows).execute()
+        seeded = supabase.table("subject_presets").select("id, subject").eq("user_id", user_id).execute()
+        return [
+            {"id": row.get("id"), "subject": row.get("subject"), "position": idx}
+            for idx, row in enumerate(seeded.data or [])
+        ]
+
+
+def classify_subject(topic: str, content: str, preset_subjects: List[str]) -> str:
+    if not preset_subjects:
+        return "Other"
+
+    options = [normalize_subject(s) for s in preset_subjects]
+    option_text = ", ".join(options)
+    sample = content[:1200]
+
+    prompt = (
+        "Choose exactly one subject from this list that best matches the topic and text.\n"
+        f"Subjects: {option_text}\n\n"
+        f"Topic: {topic}\n"
+        f"Text sample: {sample}\n\n"
+        "Respond in JSON only: {\"subject\":\"<one listed subject>\"}"
+    )
+
+    try:
+        response = openai_client.chat.completions.create(
+            model=config.OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": "You classify study notes into a single predefined subject."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=50,
+            temperature=0
+        )
+        parsed = json.loads(response.choices[0].message.content)
+        picked = normalize_subject(parsed.get("subject", ""))
+        if picked in options:
+            return picked
+    except Exception as e:
+        logger.warning(f"Subject classification failed, using fallback: {e}")
+
+    lower_blob = f"{topic}\n{content[:2000]}".lower()
+    keyword_map = {
+        "Biology": ["cell", "dna", "organism", "evolution", "photosynthesis", "genetics"],
+        "History": ["empire", "war", "revolution", "century", "historical", "dynasty"],
+        "Geography": ["climate", "map", "region", "country", "river", "population"],
+        "English": ["poem", "novel", "grammar", "literature", "essay", "prose"],
+        "Math": ["equation", "algebra", "calculus", "geometry", "integral", "derivative"],
+        "Computer Science": ["algorithm", "code", "program", "database", "data structure", "computer"],
+        "Languages": ["vocabulary", "verb", "translation", "pronunciation", "language", "tense"],
+        "Physics": ["force", "energy", "velocity", "motion", "quantum", "electric"],
+        "Chemistry": ["molecule", "atom", "reaction", "compound", "chemical", "bond"],
+        "Economics": ["inflation", "market", "supply", "demand", "gdp", "economy"]
+    }
+
+    for subject in options:
+        for keyword in keyword_map.get(subject, []):
+            if keyword in lower_blob:
+                return subject
+    return options[-1] if options else "Other"
+
+
+def detect_subject_from_message(message: str, preset_subjects: List[str]) -> Optional[str]:
+    if not message or not preset_subjects:
+        return None
+
+    message_lower = message.lower()
+    normalized = [normalize_subject(s) for s in preset_subjects]
+
+    # Direct subject phrase match.
+    for subject in normalized:
+        if subject.lower() in message_lower:
+            return subject
+
+    alias_map = {
+        "Math": ["math", "mathematics", "algebra", "calculus", "geometry", "trigonometry"],
+        "Computer Science": ["cs", "computer science", "coding", "programming", "algorithm"],
+        "Languages": ["language", "spanish", "french", "german", "hindi", "vocabulary", "grammar"],
+        "Biology": ["biology", "bio", "cell", "genetics"],
+        "History": ["history", "historical", "civilization", "empire"],
+        "Geography": ["geography", "map", "climate", "region"],
+        "English": ["english", "literature", "essay", "poem"],
+        "Physics": ["physics", "force", "motion", "energy"],
+        "Chemistry": ["chemistry", "chemical", "reaction", "atom"],
+        "Economics": ["economics", "market", "inflation", "demand", "supply"]
+    }
+
+    for subject in normalized:
+        for alias in alias_map.get(subject, []):
+            if alias in message_lower:
+                return subject
+    return None
+
+
+def build_subject_context(user_id: str, subject: str) -> str:
+    try:
+        docs = supabase.table("documents").select("topic, content, created_at, subject").eq("user_id", user_id).eq(
+            "subject", subject).order("created_at", desc=False).execute()
+        rows = docs.data or []
+    except Exception:
+        # Backward compatibility when subject column is missing.
+        rows = []
+
+    if not rows:
+        return ""
+
+    chunks = []
+    for row in rows:
+        created_date = (row.get("created_at") or "")[:10] or "Unknown"
+        chunks.append(
+            f"--- Note Date: {created_date} | Subject: {subject} | Topic: {row.get('topic', 'Untitled')} ---\n{row.get('content', '')}"
+        )
+    return "\n\n".join(chunks)
 
 
 # Dependency for authentication
@@ -424,12 +644,17 @@ async def upload_docs(
             logger.error(f"Topic extraction error: {e}")
             topic = "Untitled Document"
 
+        # Classify subject from user presets
+        preset_subjects = get_subject_presets_for_user(current_user.id)
+        subject = classify_subject(topic=topic, content=combined_text, preset_subjects=preset_subjects)
+
         # Save to database
         try:
             result = supabase.table("documents").insert({
                 "user_id": current_user.id,
                 "content": combined_text,
                 "topic": topic,
+                "subject": subject,
                 "file_count": len(files),
                 "file_names": [f.filename for f in files]
             }).execute()
@@ -439,6 +664,7 @@ async def upload_docs(
             return {
                 "success": True,
                 "topic": topic,
+                "subject": subject,
                 "message": f"Successfully uploaded {len(files)} file(s)"
             }
         except Exception as db_error:
@@ -465,8 +691,9 @@ async def send_chat(
 ):
     """Send chat message and get AI response"""
     try:
-        # Validate topic_id if provided
+        # Load document context from a selected topic, selected/derived subject, or requested date range.
         document_content = ""
+        selected_subject = normalize_subject(chat_data.subject) if chat_data.subject else None
         if chat_data.topic_id:
             doc = supabase.table("documents").select("content").eq("id", chat_data.topic_id).eq("user_id",
                                                                                                 current_user.id).execute()
@@ -477,6 +704,35 @@ async def send_chat(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="Document not found"
                 )
+        else:
+            date_range = parse_date_range_from_message(chat_data.message)
+            if selected_subject:
+                document_content = build_subject_context(current_user.id, selected_subject)
+            elif date_range:
+                start_dt, end_exclusive = date_range
+                docs = supabase.table("documents").select("topic, content, created_at").eq("user_id",
+                                                                                           current_user.id).gte(
+                    "created_at", start_dt.isoformat()).lt("created_at", end_exclusive.isoformat()).order(
+                    "created_at", desc=False).execute()
+
+                if not docs.data:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"No notes found between {start_dt.date()} and {(end_exclusive - timedelta(days=1)).date()}"
+                    )
+
+                chunks = []
+                for row in docs.data:
+                    created_date = row.get("created_at", "")[:10]
+                    chunks.append(
+                        f"--- Note Date: {created_date} | Topic: {row.get('topic', 'Untitled')} ---\n{row.get('content', '')}"
+                    )
+                document_content = "\n\n".join(chunks)
+            else:
+                preset_subjects = get_subject_presets_for_user(current_user.id)
+                inferred_subject = detect_subject_from_message(chat_data.message, preset_subjects)
+                if inferred_subject:
+                    document_content = build_subject_context(current_user.id, inferred_subject)
 
         # Generate or use existing chat_id
         chat_id = chat_data.chat_id or str(uuid.uuid4())
@@ -485,7 +741,8 @@ async def send_chat(
         # Generate chat title from first message (limited to 100 chars)
         chat_title = None
         if is_new_chat:
-            chat_title = chat_data.message[:100] if len(chat_data.message) <= 100 else chat_data.message[:97] + "..."
+            first_question = re.sub(r"\s+", " ", chat_data.message).strip()
+            chat_title = first_question[:100] if len(first_question) <= 100 else first_question[:97] + "..."
 
         # Get allowed domains for web search
         res = supabase.table("allowed_sources").select("domain").eq("user_id", current_user.id).execute()
@@ -663,12 +920,51 @@ async def get_chat_history(chat_id: str, current_user=Depends(get_current_user))
         return {"messages": []}
 
 
+@app.get("/api/chat/list-all")
+async def list_all_chats(current_user=Depends(get_current_user)):
+    """List all chats for the user, including chats not tied to a single topic"""
+    try:
+        messages = supabase.table("chat_messages").select("chat_id, chat_title, topic_id, created_at").eq("user_id",
+                                                                                                            current_user.id).order(
+            "created_at", desc=True).execute()
+
+        docs = supabase.table("documents").select("id, topic").eq("user_id", current_user.id).execute()
+        topic_map = {row["id"]: row.get("topic", "Untitled") for row in (docs.data or [])}
+
+        seen = {}
+        for row in messages.data or []:
+            chat_id = row.get("chat_id")
+            if chat_id and chat_id not in seen:
+                topic_id = row.get("topic_id")
+                seen[chat_id] = {
+                    "chat_id": chat_id,
+                    "chat_title": row.get("chat_title"),
+                    "topic_id": topic_id,
+                    "topic_name": topic_map.get(topic_id, "Date-range notes") if topic_id else "Date-range notes",
+                    "created_at": row.get("created_at")
+                }
+
+        return {"chats": list(seen.values())}
+    except Exception as e:
+        logger.error(f"List all chats error: {e}")
+        return {"chats": []}
+
+
 @app.get("/api/chat/topics")
 async def get_chat_topics(current_user=Depends(get_current_user)):
     """Get all topics for the user"""
     try:
-        result = supabase.table("documents").select("id, topic").eq("user_id", current_user.id).execute()
-        return {"topics": result.data}
+        try:
+            result = supabase.table("documents").select("id, topic, subject, created_at").eq("user_id",
+                                                                                              current_user.id).order(
+                "created_at", desc=True).execute()
+            rows = result.data or []
+        except Exception:
+            # Backward compatibility for older schema.
+            result = supabase.table("documents").select("id, topic").eq("user_id", current_user.id).execute()
+            rows = [{"id": r.get("id"), "topic": r.get("topic"), "subject": "Uncategorized", "created_at": None}
+                    for r in (result.data or [])]
+        return {"topics": rows}
     except Exception as e:
         logger.error(f"Get topics error: {e}")
         return {"topics": []}
@@ -678,15 +974,35 @@ async def get_chat_topics(current_user=Depends(get_current_user)):
 async def get_topics(current_user=Depends(get_current_user)):
     """Get all topics with content for the user"""
     try:
-        result = supabase.table("documents").select("topic, content").eq("user_id", current_user.id).execute()
+        try:
+            result = supabase.table("documents").select("id, topic, content, subject, created_at").eq("user_id",
+                                                                                                        current_user.id).order(
+                "created_at", desc=True).execute()
+            rows = result.data or []
+        except Exception:
+            # Backward compatibility for older schema.
+            result = supabase.table("documents").select("id, topic, content").eq("user_id", current_user.id).execute()
+            rows = [{
+                "id": r.get("id"),
+                "topic": r.get("topic"),
+                "content": r.get("content"),
+                "subject": "Uncategorized",
+                "created_at": None
+            } for r in (result.data or [])]
 
-        return {
-            "result_topics": [{"topic": r["topic"]} for r in result.data],
-            "result_content": [{"content": r["content"]} for r in result.data]
-        }
+        topics = []
+        for row in rows:
+            topics.append({
+                "id": row.get("id"),
+                "topic": row.get("topic"),
+                "content": row.get("content"),
+                "subject": row.get("subject") or "Uncategorized",
+                "created_at": row.get("created_at")
+            })
+        return {"topics": topics}
     except Exception as e:
         logger.error(f"Get topics with content error: {e}")
-        return {"result_topics": [], "result_content": []}
+        return {"topics": []}
 
 
 @app.get("/api/dashboard/stats")
@@ -758,6 +1074,74 @@ async def delete_source(source_id: str, current_user=Depends(get_current_user)):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Failed to delete source"
+        )
+
+
+@app.get("/api/subject-presets")
+async def get_subject_presets(current_user=Depends(get_current_user)):
+    """Get ordered subject presets for the user"""
+    try:
+        seeded = ensure_subject_presets_seeded(current_user.id)
+        return {"presets": seeded}
+    except Exception as e:
+        logger.error(f"Get subject presets error: {e}")
+        defaults = [{"subject": s, "position": idx} for idx, s in enumerate(DEFAULT_SUBJECT_PRESETS)]
+        return {"presets": defaults}
+
+
+@app.post("/api/subject-presets")
+async def add_subject_preset(data: SubjectPresetData, current_user=Depends(get_current_user)):
+    """Add a new subject preset"""
+    subject = normalize_subject(data.subject)
+    try:
+        existing = ensure_subject_presets_seeded(current_user.id)
+        if any(normalize_subject(r["subject"]) == subject for r in existing):
+            return {"success": True, "message": "Subject already exists"}
+
+        max_position = max([r.get("position", 0) for r in existing], default=-1)
+        supabase.table("subject_presets").insert({
+            "user_id": current_user.id,
+            "subject": subject,
+            "position": max_position + 1
+        }).execute()
+        return {"success": True}
+    except Exception as e:
+        logger.error(f"Add subject preset error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to add subject preset"
+        )
+
+
+@app.put("/api/subject-presets/reorder")
+async def reorder_subject_presets(data: SubjectPresetOrderData, current_user=Depends(get_current_user)):
+    """Reorder subject presets by IDs"""
+    try:
+        owned = supabase.table("subject_presets").select("id").eq("user_id", current_user.id).execute()
+        owned_ids = {row["id"] for row in owned.data or []}
+        if not set(data.preset_ids).issubset(owned_ids):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid subject preset IDs"
+            )
+
+        for index, preset_id in enumerate(data.preset_ids):
+            try:
+                supabase.table("subject_presets").update({"position": index}).eq("id", preset_id).eq("user_id",
+                                                                                                      current_user.id).execute()
+            except Exception:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Preset reordering requires a `position` column in subject_presets"
+                )
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Reorder subject presets error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to reorder subject presets"
         )
 
 
