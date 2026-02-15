@@ -170,15 +170,13 @@
 
     <ul id="domain-list"></ul>
 </div>
-<script src="/static/script.js"></script>
+<script src="/static/script.js?v=20260215-2"></script>
 <script>
 const token = localStorage.getItem("access_token");
 if (!token) window.location.href = "/";
 
 async function loadDomains() {
-    const res = await fetch("/api/sources", {
-        headers: { Authorization: "Bearer " + token }
-    });
+    const res = await authenticatedFetch("/api/sources");
     const data = await res.json();
 
     const list = document.getElementById("domain-list");
@@ -204,11 +202,10 @@ async function addDomain() {
     const domain = input.value.trim();
     if (!domain) return;
 
-    await fetch("/api/sources", {
+    await authenticatedFetch("/api/sources", {
         method: "POST",
         headers: {
-            "Content-Type": "application/json",
-            Authorization: "Bearer " + token
+            "Content-Type": "application/json"
         },
         body: JSON.stringify({ domain })
     });
@@ -218,10 +215,7 @@ async function addDomain() {
 }
 
 async function deleteDomain(id) {
-    await fetch(`/api/sources/${id}`, {
-        method: "DELETE",
-        headers: { Authorization: "Bearer " + token }
-    });
+    await authenticatedFetch(`/api/sources/${id}`, { method: "DELETE" });
     loadDomains();
 }
 

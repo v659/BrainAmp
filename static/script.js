@@ -28,6 +28,47 @@ function sanitizeInput(input) {
     return div.innerHTML;
 }
 
+function renderMarkdown(markdownText) {
+    if (!markdownText) return "";
+    let html = sanitizeInput(markdownText);
+
+    // Code blocks first to protect inner markdown.
+    html = html.replace(/```([\s\S]*?)```/g, (match, code) => {
+        return `<pre style="background:#111827;color:#f9fafb;padding:12px;border-radius:8px;overflow:auto;"><code>${code.trim()}</code></pre>`;
+    });
+
+    // Inline code
+    html = html.replace(/`([^`]+)`/g, '<code style="background:#f3f4f6;padding:2px 6px;border-radius:4px;">$1</code>');
+
+    // Headings
+    html = html.replace(/^### (.*)$/gm, '<h3 style="margin:10px 0 6px 0;">$1</h3>');
+    html = html.replace(/^## (.*)$/gm, '<h2 style="margin:12px 0 8px 0;">$1</h2>');
+    html = html.replace(/^# (.*)$/gm, '<h1 style="margin:14px 0 10px 0;">$1</h1>');
+
+    // Bold / italic
+    html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+    html = html.replace(/\*(.*?)\*/g, '<em>$1</em>');
+
+    // Links
+    html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+
+    // Unordered lists
+    html = html.replace(/(?:^|\n)([-*] .*(?:\n[-*] .*)*)/g, (block) => {
+        const items = block.trim().split('\n').map(line => line.replace(/^[-*]\s+/, '').trim());
+        return `\n<ul style="margin:8px 0 8px 20px;">${items.map(item => `<li>${item}</li>`).join('')}</ul>`;
+    });
+
+    // Ordered lists
+    html = html.replace(/(?:^|\n)(\d+\. .*(?:\n\d+\. .*)*)/g, (block) => {
+        const items = block.trim().split('\n').map(line => line.replace(/^\d+\.\s+/, '').trim());
+        return `\n<ol style="margin:8px 0 8px 20px;">${items.map(item => `<li>${item}</li>`).join('')}</ol>`;
+    });
+
+    // Line breaks for remaining text lines.
+    html = html.replace(/\n/g, "<br>");
+    return html;
+}
+
 function getFileExtension(filename) {
     return filename.split('.').pop().toLowerCase();
 }
@@ -54,6 +95,54 @@ function clearError(elementId) {
         errorDiv.textContent = '';
         errorDiv.style.display = 'none';
     }
+}
+
+async function refreshAuthSession() {
+    const refreshToken = localStorage.getItem("refresh_token");
+    if (!refreshToken) return false;
+
+    try {
+        const res = await fetch("/api/refresh", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ refresh_token: refreshToken })
+        });
+        if (!res.ok) return false;
+        const data = await res.json();
+        if (!data.access_token || !data.refresh_token) return false;
+
+        localStorage.setItem("access_token", data.access_token);
+        localStorage.setItem("refresh_token", data.refresh_token);
+        return true;
+    } catch (err) {
+        console.error("Session refresh error:", err);
+        return false;
+    }
+}
+
+async function authenticatedFetch(url, options = {}) {
+    const accessToken = localStorage.getItem("access_token");
+    const headers = { ...(options.headers || {}) };
+    if (accessToken) {
+        headers.Authorization = "Bearer " + accessToken;
+    }
+
+    let response = await fetch(url, { ...options, headers });
+    if (response.status !== 401) {
+        return response;
+    }
+
+    const refreshed = await refreshAuthSession();
+    if (!refreshed) {
+        localStorage.removeItem("access_token");
+        localStorage.removeItem("refresh_token");
+        return response;
+    }
+
+    const newAccess = localStorage.getItem("access_token");
+    const retryHeaders = { ...(options.headers || {}) };
+    if (newAccess) retryHeaders.Authorization = "Bearer " + newAccess;
+    return fetch(url, { ...options, headers: retryHeaders });
 }
 
 // Authentication Functions
@@ -112,6 +201,7 @@ async function sendLogin() {
         }
 
         localStorage.setItem("access_token", data.access_token);
+        if (data.refresh_token) localStorage.setItem("refresh_token", data.refresh_token);
         window.location.href = "/dashboard";
 
     } catch (err) {
@@ -181,6 +271,7 @@ async function sendSignup() {
         }
 
         localStorage.setItem("access_token", data.access_token);
+        if (data.refresh_token) localStorage.setItem("refresh_token", data.refresh_token);
         window.location.href = "/dashboard";
 
     } catch (err) {
@@ -205,9 +296,7 @@ async function loadUser() {
     }
 
     try {
-        const res = await fetch("/api/me", {
-            headers: { "Authorization": "Bearer " + token }
-        });
+        const res = await authenticatedFetch("/api/me");
 
         if (!res.ok) {
             localStorage.removeItem("access_token");
@@ -230,6 +319,7 @@ async function loadUser() {
 
 function logout() {
     localStorage.removeItem("access_token");
+    localStorage.removeItem("refresh_token");
     window.location.href = "/";
 }
 
@@ -376,9 +466,8 @@ async function uploadFile() {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout for upload
 
-        const response = await fetch('/api/upload', {
+        const response = await authenticatedFetch('/api/upload', {
             method: 'POST',
-            headers: { 'Authorization': `Bearer ${accessToken}` },
             body: formData,
             signal: controller.signal
         });
@@ -419,9 +508,7 @@ async function get_usersAndtopic(api) {
     }
 
     try {
-        const res = await fetch(api, {
-            headers: { "Authorization": "Bearer " + token }
-        });
+        const res = await authenticatedFetch(api);
 
         if (!res.ok) {
             throw new Error(`HTTP ${res.status}`);
@@ -475,6 +562,7 @@ async function get_usersAndtopic(api) {
                 const topic = topicObj.topic || "Untitled";
                 const content = topicObj.content || "No content available";
                 const createdAt = topicObj.created_at ? new Date(topicObj.created_at).toLocaleDateString() : "Unknown date";
+                const documentId = topicObj.id;
 
                 const wrapper = document.createElement("div");
                 wrapper.style.cssText = `
@@ -485,10 +573,17 @@ async function get_usersAndtopic(api) {
                     box-shadow: 0 2px 6px rgba(0,0,0,0.1);
                 `;
 
+                const headerRow = document.createElement("div");
+                headerRow.style.cssText = `
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                `;
+
                 const button = document.createElement("button");
                 button.textContent = `${topic} (${createdAt})`;
                 button.style.cssText = `
-                    width: 100%;
+                    flex: 1;
                     padding: 14px;
                     font-size: 1rem;
                     text-align: left;
@@ -497,6 +592,23 @@ async function get_usersAndtopic(api) {
                     cursor: pointer;
                     font-weight: 600;
                 `;
+
+                const deleteBtn = document.createElement("button");
+                deleteBtn.textContent = "Delete";
+                deleteBtn.style.cssText = `
+                    margin-right: 10px;
+                    padding: 8px 10px;
+                    border: none;
+                    border-radius: 6px;
+                    background: #dc2626;
+                    color: #fff;
+                    cursor: pointer;
+                    font-size: 12px;
+                `;
+                deleteBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    deleteDocument(documentId, topic);
+                };
 
                 const contentDiv = document.createElement("div");
                 contentDiv.style.cssText = `
@@ -521,7 +633,9 @@ async function get_usersAndtopic(api) {
                     contentDiv.style.display = isOpen ? "none" : "block";
                 };
 
-                wrapper.appendChild(button);
+                headerRow.appendChild(button);
+                if (documentId) headerRow.appendChild(deleteBtn);
+                wrapper.appendChild(headerRow);
                 wrapper.appendChild(contentDiv);
                 container.appendChild(wrapper);
             });
@@ -540,6 +654,31 @@ async function get_usersAndtopic(api) {
     }
 }
 
+async function deleteDocument(documentId, topicName = "this document") {
+    const token = localStorage.getItem("access_token");
+    if (!token || !documentId) return;
+
+    if (!confirm(`Delete "${topicName}"? This will also remove chats linked to this document.`)) {
+        return;
+    }
+
+    try {
+        const res = await authenticatedFetch(`/api/documents/${documentId}`, {
+            method: "DELETE",
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Failed to delete document");
+
+        await get_usersAndtopic("/api/get_topics");
+        if (typeof loadAllChats === "function") {
+            await loadAllChats();
+        }
+    } catch (err) {
+        console.error("Delete document error:", err);
+        alert(err.message || "Failed to delete document");
+    }
+}
+
 async function loadSubjectPresets() {
     const token = localStorage.getItem("access_token");
     const listDiv = document.getElementById("subject-preset-list");
@@ -550,9 +689,7 @@ async function loadSubjectPresets() {
     }
 
     try {
-        const res = await fetch("/api/subject-presets", {
-            headers: { "Authorization": "Bearer " + token }
-        });
+        const res = await authenticatedFetch("/api/subject-presets");
         if (!res.ok) throw new Error("Failed to load subject presets");
         const data = await res.json();
         const presets = data.presets || [];
@@ -610,11 +747,10 @@ async function addSubjectPreset() {
     if (!subject) return;
 
     try {
-        const res = await fetch("/api/subject-presets", {
+        const res = await authenticatedFetch("/api/subject-presets", {
             method: "POST",
             headers: {
-                "Content-Type": "application/json",
-                "Authorization": "Bearer " + token
+                "Content-Type": "application/json"
             },
             body: JSON.stringify({ subject })
         });
@@ -639,11 +775,10 @@ async function reorderSubjectPreset(index, direction, presets) {
     const presetIds = cloned.map(p => p.id).filter(Boolean);
 
     try {
-        const res = await fetch("/api/subject-presets/reorder", {
+        const res = await authenticatedFetch("/api/subject-presets/reorder", {
             method: "PUT",
             headers: {
-                "Content-Type": "application/json",
-                "Authorization": "Bearer " + token
+                "Content-Type": "application/json"
             },
             body: JSON.stringify({ preset_ids: presetIds })
         });
@@ -668,9 +803,7 @@ async function loadChatTopics() {
     }
 
     try {
-        const res = await fetch("/api/subject-presets", {
-            headers: { "Authorization": "Bearer " + token }
-        });
+        const res = await authenticatedFetch("/api/subject-presets");
 
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
@@ -801,11 +934,16 @@ function addMessageToChat(sender, message, isUser) {
     `;
 
     const contentDiv = document.createElement("div");
-    contentDiv.textContent = message;
     contentDiv.style.cssText = `
         white-space: pre-wrap;
         word-wrap: break-word;
+        line-height: 1.5;
     `;
+    if (isUser) {
+        contentDiv.textContent = message;
+    } else {
+        contentDiv.innerHTML = renderMarkdown(message);
+    }
 
     messageDiv.appendChild(senderDiv);
     messageDiv.appendChild(contentDiv);
@@ -837,11 +975,10 @@ async function sendMessage() {
     addMessageToChat("You", message, true);
 
     try {
-        const response = await fetch("/api/chat/send", {
+        const response = await authenticatedFetch("/api/chat/send", {
             method: "POST",
             headers: {
-                "Content-Type": "application/json",
-                "Authorization": "Bearer " + token
+                "Content-Type": "application/json"
             },
             body: JSON.stringify({
                 topic_id: currentTopicId,
@@ -866,7 +1003,7 @@ async function sendMessage() {
 
     } catch (err) {
         console.error("Send message error:", err);
-        addMessageToChat("System", "Error: Failed to get AI response. Please try again.", false);
+        addMessageToChat("System", `Error: ${err.message || "Failed to get AI response. Please try again."}`, false);
     }
 }
 
@@ -875,9 +1012,7 @@ async function loadChatHistory(chatId) {
     if (!token || !chatId) return;
 
     try {
-        const res = await fetch(`/api/chat/history/${chatId}`, {
-            headers: { "Authorization": "Bearer " + token }
-        });
+        const res = await authenticatedFetch(`/api/chat/history/${chatId}`);
 
         if (!res.ok) throw new Error("Failed to load history");
 
@@ -907,9 +1042,7 @@ async function loadSettings() {
     }
 
     try {
-        const res = await fetch("/api/me", {
-            headers: { "Authorization": "Bearer " + token }
-        });
+        const res = await authenticatedFetch("/api/me");
 
         if (!res.ok) {
             window.location.href = "/";
@@ -949,11 +1082,10 @@ async function updateProfile() {
     btn.textContent = "Saving...";
 
     try {
-        const res = await fetch("/api/update-profile", {
+        const res = await authenticatedFetch("/api/update-profile", {
             method: "POST",
             headers: {
-                "Content-Type": "application/json",
-                "Authorization": "Bearer " + token
+                "Content-Type": "application/json"
             },
             body: JSON.stringify({ display_name: displayName })
         });
@@ -993,12 +1125,8 @@ async function loadDashboardStats() {
 
     try {
         const [topicsRes, statsRes] = await Promise.all([
-            fetch("/api/chat/topics", {
-                headers: { "Authorization": "Bearer " + token }
-            }),
-            fetch("/api/dashboard/stats", {
-                headers: { "Authorization": "Bearer " + token }
-            })
+            authenticatedFetch("/api/chat/topics"),
+            authenticatedFetch("/api/dashboard/stats")
         ]);
 
         if (topicsRes.ok) {
@@ -1058,9 +1186,7 @@ async function loadAllChats() {
     }
 
     try {
-        const chatsRes = await fetch("/api/chat/list-all", {
-            headers: { "Authorization": "Bearer " + token }
-        });
+        const chatsRes = await authenticatedFetch("/api/chat/list-all");
 
         if (!chatsRes.ok) return;
         const chatsData = await chatsRes.json();
@@ -1089,11 +1215,42 @@ async function loadAllChats() {
             const previewText = chat.topic_name || "Chat session";
             const createdAt = chat.created_at ? new Date(chat.created_at).toLocaleString() : "Click to load";
 
-            chatItem.innerHTML = `
-                <div class="chat-item-title">${sanitizeInput(displayTitle)}</div>
-                <div class="chat-item-preview">${sanitizeInput(previewText)}</div>
-                <div class="chat-item-time">${sanitizeInput(createdAt)}</div>
+            const topRow = document.createElement("div");
+            topRow.style.cssText = "display:flex;justify-content:space-between;align-items:flex-start;gap:8px;";
+            const titleDiv = document.createElement("div");
+            titleDiv.className = "chat-item-title";
+            titleDiv.textContent = displayTitle;
+            titleDiv.style.flex = "1";
+
+            const deleteBtn = document.createElement("button");
+            deleteBtn.textContent = "Delete";
+            deleteBtn.style.cssText = `
+                border:none;
+                border-radius:6px;
+                background:#dc2626;
+                color:#fff;
+                cursor:pointer;
+                font-size:11px;
+                padding:4px 8px;
             `;
+            deleteBtn.onclick = async (e) => {
+                e.stopPropagation();
+                await deleteChat(chat.chat_id, displayTitle);
+            };
+
+            topRow.appendChild(titleDiv);
+            topRow.appendChild(deleteBtn);
+            chatItem.appendChild(topRow);
+
+            const previewDiv = document.createElement("div");
+            previewDiv.className = "chat-item-preview";
+            previewDiv.textContent = previewText;
+            chatItem.appendChild(previewDiv);
+
+            const timeDiv = document.createElement("div");
+            timeDiv.className = "chat-item-time";
+            timeDiv.textContent = createdAt;
+            chatItem.appendChild(timeDiv);
 
             chatListDiv.appendChild(chatItem);
         });
@@ -1107,6 +1264,32 @@ async function loadAllChats() {
         }
     } catch (err) {
         console.error("Load all chats error:", err);
+    }
+}
+
+async function deleteChat(chatId, chatTitle = "this chat") {
+    const token = localStorage.getItem("access_token");
+    if (!token || !chatId) return;
+
+    if (!confirm(`Delete "${chatTitle}"? This will remove all messages in this chat.`)) {
+        return;
+    }
+
+    try {
+        const res = await authenticatedFetch(`/api/chat/${chatId}`, {
+            method: "DELETE",
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Failed to delete chat");
+
+        if (currentChatId === chatId) {
+            currentChatId = null;
+            clearChat();
+        }
+        await loadAllChats();
+    } catch (err) {
+        console.error("Delete chat error:", err);
+        alert(err.message || "Failed to delete chat");
     }
 }
 

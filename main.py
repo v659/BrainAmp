@@ -6,6 +6,7 @@ import tempfile
 import uuid
 import re
 import json
+import subprocess
 
 from fastapi import FastAPI, Request, Header, HTTPException, Depends, UploadFile, File, status
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -42,8 +43,8 @@ class Config:
     MAX_FILES_PER_UPLOAD = 5
     ALLOWED_FILE_EXTENSIONS = {"pdf", "docx", "txt", "png", "jpg", "jpeg"}
     CHAT_HISTORY_LIMIT = 12
-    DOCUMENT_CONTENT_LIMIT = 2000
-    WEB_CONTEXT_LIMIT = 2000
+    DOCUMENT_CONTENT_LIMIT = 12000
+    WEB_CONTEXT_LIMIT = 3000
     PASSWORD_MIN_LENGTH = 8
     OPENAI_MODEL = "gpt-4o-mini"
 
@@ -146,6 +147,10 @@ class SubjectPresetOrderData(BaseModel):
     preset_ids: List[str] = Field(..., min_items=1)
 
 
+class RefreshTokenData(BaseModel):
+    refresh_token: str = Field(..., min_length=10)
+
+
 def normalize_subject(subject: str) -> str:
     return re.sub(r"\s+", " ", subject.strip()).title()
 
@@ -185,6 +190,50 @@ def parse_date_range_from_message(message: str) -> Optional[tuple[datetime, date
     start_dt = start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
     end_exclusive = end_dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
     return start_dt, end_exclusive
+
+
+def infer_date_range_from_message(message: str, local_date_iso: str) -> Optional[tuple[datetime, datetime]]:
+    """Use the model to infer date windows like yesterday/last week/tomorrow from user text."""
+    try:
+        response = openai_client.chat.completions.create(
+            model=config.OPENAI_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Extract a date range from the message relative to the provided local date. "
+                        "Return JSON only in this shape: "
+                        "{\"start\":\"YYYY-MM-DD\"|null,\"end\":\"YYYY-MM-DD\"|null}. "
+                        "Use inclusive end date. If no date reference, return nulls."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": f"Local date: {local_date_iso}\nMessage: {message}"
+                }
+            ],
+            max_tokens=60,
+            temperature=0
+        )
+        parsed = json.loads((response.choices[0].message.content or "").strip())
+        start_text = parsed.get("start")
+        end_text = parsed.get("end")
+        if not start_text or not end_text:
+            return None
+
+        start_dt = try_parse_date(start_text)
+        end_dt = try_parse_date(end_text)
+        if not start_dt or not end_dt:
+            return None
+        if end_dt < start_dt:
+            start_dt, end_dt = end_dt, start_dt
+
+        start_dt = start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_exclusive = end_dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        return start_dt, end_exclusive
+    except Exception as e:
+        logger.warning(f"Date range inference failed: {e}")
+        return None
 
 
 def get_subject_presets_for_user(user_id: str) -> List[str]:
@@ -322,6 +371,112 @@ def detect_subject_from_message(message: str, preset_subjects: List[str]) -> Opt
     return None
 
 
+def detect_subjects_from_message(message: str, preset_subjects: List[str]) -> List[str]:
+    if not message or not preset_subjects:
+        return []
+
+    message_lower = message.lower()
+    normalized = [normalize_subject(s) for s in preset_subjects]
+    found = []
+
+    for subject in normalized:
+        if subject.lower() in message_lower and subject not in found:
+            found.append(subject)
+
+    alias_map = {
+        "Math": ["math", "mathematics", "algebra", "calculus", "geometry", "trigonometry"],
+        "Computer Science": ["cs", "computer science", "computer", "coding", "programming", "algorithm"],
+        "Languages": ["language", "spanish", "french", "german", "hindi", "vocabulary", "grammar"],
+        "Biology": ["biology", "bio", "cell", "genetics"],
+        "History": ["history", "historical", "civilization", "empire"],
+        "Geography": ["geography", "map", "climate", "region"],
+        "English": ["english", "literature", "essay", "poem"],
+        "Physics": ["physics", "force", "motion", "energy"],
+        "Chemistry": ["chemistry", "chemical", "reaction", "atom"],
+        "Economics": ["economics", "market", "inflation", "demand", "supply"]
+    }
+
+    for subject in normalized:
+        if subject in found:
+            continue
+        for alias in alias_map.get(subject, []):
+            if re.search(rf"\b{re.escape(alias)}\b", message_lower):
+                found.append(subject)
+                break
+
+    return found
+
+
+def infer_subject_date_requests(message: str, preset_subjects: List[str], local_date_iso: str) -> List[dict]:
+    """Infer one or more subject/date windows from message using model."""
+    if not message:
+        return []
+    options = [normalize_subject(s) for s in preset_subjects] if preset_subjects else []
+
+    try:
+        response = openai_client.chat.completions.create(
+            model=config.OPENAI_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Extract note requests from the user message. "
+                        "Return JSON only in shape: "
+                        "{\"requests\":[{\"subject\":\"<one allowed subject or null>\","
+                        "\"start\":\"YYYY-MM-DD\"|null,\"end\":\"YYYY-MM-DD\"|null}]}. "
+                        "Use inclusive end date. Use provided local date for relative terms."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Allowed subjects: {', '.join(options) if options else 'None'}\n"
+                        f"Local date: {local_date_iso}\n"
+                        f"Message: {message}"
+                    )
+                }
+            ],
+            max_tokens=220,
+            temperature=0
+        )
+        parsed = json.loads((response.choices[0].message.content or "").strip())
+        requests = parsed.get("requests", [])
+        if not isinstance(requests, list):
+            return []
+
+        normalized_requests = []
+        for req in requests:
+            if not isinstance(req, dict):
+                continue
+
+            subject = req.get("subject")
+            subject_norm = normalize_subject(subject) if subject else None
+            if subject_norm and options and subject_norm not in options:
+                continue
+
+            start_text = req.get("start")
+            end_text = req.get("end")
+            date_range = None
+            if start_text and end_text:
+                start_dt = try_parse_date(start_text)
+                end_dt = try_parse_date(end_text)
+                if start_dt and end_dt:
+                    if end_dt < start_dt:
+                        start_dt, end_dt = end_dt, start_dt
+                    start_dt = start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+                    end_exclusive = end_dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+                    date_range = (start_dt, end_exclusive)
+
+            normalized_requests.append({
+                "subject": subject_norm,
+                "date_range": date_range
+            })
+        return normalized_requests
+    except Exception as e:
+        logger.warning(f"Subject/date request inference failed: {e}")
+        return []
+
+
 def build_subject_context(user_id: str, subject: str) -> str:
     try:
         docs = supabase.table("documents").select("topic, content, created_at, subject").eq("user_id", user_id).eq(
@@ -341,6 +496,86 @@ def build_subject_context(user_id: str, subject: str) -> str:
             f"--- Note Date: {created_date} | Subject: {subject} | Topic: {row.get('topic', 'Untitled')} ---\n{row.get('content', '')}"
         )
     return "\n\n".join(chunks)
+
+
+def build_filtered_context(
+        user_id: str,
+        subject: Optional[str] = None,
+        date_range: Optional[tuple[datetime, datetime]] = None
+) -> str:
+    try:
+        query = supabase.table("documents").select("topic, content, created_at, subject").eq("user_id", user_id)
+        if subject:
+            query = query.eq("subject", subject)
+        if date_range:
+            start_dt, end_exclusive = date_range
+            query = query.gte("created_at", start_dt.isoformat()).lt("created_at", end_exclusive.isoformat())
+        docs = query.order("created_at", desc=False).execute()
+        rows = docs.data or []
+    except Exception:
+        # Backward compatibility: fallback to basic fields and in-memory filtering.
+        docs = supabase.table("documents").select("topic, content, created_at").eq("user_id", user_id).execute()
+        rows = docs.data or []
+        if date_range:
+            start_dt, end_exclusive = date_range
+            filtered = []
+            for row in rows:
+                created_raw = row.get("created_at")
+                if not created_raw:
+                    continue
+                created_dt = datetime.fromisoformat(created_raw.replace("Z", "+00:00")).replace(tzinfo=None)
+                if start_dt <= created_dt < end_exclusive:
+                    filtered.append(row)
+            rows = filtered
+
+    if not rows:
+        return ""
+
+    chunks = []
+    for row in rows:
+        created_date = (row.get("created_at") or "")[:10] or "Unknown"
+        row_subject = row.get("subject") or (subject if subject else "Uncategorized")
+        chunks.append(
+            f"--- Note Date: {created_date} | Subject: {row_subject} | Topic: {row.get('topic', 'Untitled')} ---\n{row.get('content', '')}"
+        )
+    return "\n\n".join(chunks)
+
+
+def generate_chat_title_from_message(message: str) -> str:
+    cleaned = re.sub(r"\s+", " ", message).strip()
+    if not cleaned:
+        return "New chat"
+
+    try:
+        response = openai_client.chat.completions.create(
+            model=config.OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": "Generate a concise chat title (max 8 words). Return only the title text."},
+                {"role": "user", "content": cleaned}
+            ],
+            max_tokens=24,
+            temperature=0.2
+        )
+        title = (response.choices[0].message.content or "").strip().strip('"').strip("'")
+        title = re.sub(r"\s+", " ", title)
+        if title:
+            return title[:100] if len(title) <= 100 else title[:97] + "..."
+    except Exception as e:
+        logger.warning(f"Chat title generation fallback used: {e}")
+
+    return cleaned[:100] if len(cleaned) <= 100 else cleaned[:97] + "..."
+
+
+def get_terminal_datetime_context() -> tuple[str, str]:
+    """Fetch local date/time from terminal as authoritative runtime context."""
+    try:
+        iso_now = subprocess.check_output(["date", "+%Y-%m-%d"], text=True).strip()
+        long_now = subprocess.check_output(["date", "+%A, %B %d, %Y"], text=True).strip()
+        return iso_now, long_now
+    except Exception as e:
+        logger.warning(f"Terminal date fetch failed, using Python datetime fallback: {e}")
+        now = datetime.now()
+        return now.strftime("%Y-%m-%d"), now.strftime("%A, %B %d, %Y")
 
 
 # Dependency for authentication
@@ -452,7 +687,8 @@ async def login(data: LoginData):
                 "user_id": result.user.id,
                 "email": result.user.email,
                 "display_name": result.user.user_metadata.get("display_name", data.username),
-                "access_token": result.session.access_token
+                "access_token": result.session.access_token,
+                "refresh_token": result.session.refresh_token
             }
 
         return JSONResponse(
@@ -486,7 +722,8 @@ async def signup(data: SignupData):
                 "user_id": result.user.id,
                 "email": result.user.email,
                 "display_name": result.user.user_metadata.get("display_name", data.username),
-                "access_token": result.session.access_token
+                "access_token": result.session.access_token,
+                "refresh_token": result.session.refresh_token
             }
 
         return JSONResponse(
@@ -531,6 +768,31 @@ async def update_profile(
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
             content={"error": "Failed to update profile. Please try again."}
+        )
+
+
+@app.post("/api/refresh")
+async def refresh_access_token(data: RefreshTokenData):
+    """Refresh access token using Supabase refresh token."""
+    try:
+        refreshed = supabase.auth.refresh_session(data.refresh_token)
+        session = refreshed.session
+        if not session:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Failed to refresh session"
+            )
+        return {
+            "access_token": session.access_token,
+            "refresh_token": session.refresh_token
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Token refresh error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid refresh token"
         )
 
 
@@ -692,7 +954,9 @@ async def send_chat(
     """Send chat message and get AI response"""
     try:
         # Load document context from a selected topic, selected/derived subject, or requested date range.
+        local_date_iso, local_date_long = get_terminal_datetime_context()
         document_content = ""
+        context_notice = ""
         selected_subject = normalize_subject(chat_data.subject) if chat_data.subject else None
         if chat_data.topic_id:
             doc = supabase.table("documents").select("content").eq("id", chat_data.topic_id).eq("user_id",
@@ -705,34 +969,65 @@ async def send_chat(
                     detail="Document not found"
                 )
         else:
-            date_range = parse_date_range_from_message(chat_data.message)
+            explicit_date_range = parse_date_range_from_message(chat_data.message)
+            preset_subjects = get_subject_presets_for_user(current_user.id)
+            request_specs = []
+
             if selected_subject:
-                document_content = build_subject_context(current_user.id, selected_subject)
-            elif date_range:
-                start_dt, end_exclusive = date_range
-                docs = supabase.table("documents").select("topic, content, created_at").eq("user_id",
-                                                                                           current_user.id).gte(
-                    "created_at", start_dt.isoformat()).lt("created_at", end_exclusive.isoformat()).order(
-                    "created_at", desc=False).execute()
-
-                if not docs.data:
-                    raise HTTPException(
-                        status_code=status.HTTP_404_NOT_FOUND,
-                        detail=f"No notes found between {start_dt.date()} and {(end_exclusive - timedelta(days=1)).date()}"
-                    )
-
-                chunks = []
-                for row in docs.data:
-                    created_date = row.get("created_at", "")[:10]
-                    chunks.append(
-                        f"--- Note Date: {created_date} | Topic: {row.get('topic', 'Untitled')} ---\n{row.get('content', '')}"
-                    )
-                document_content = "\n\n".join(chunks)
+                inferred_date_range = infer_date_range_from_message(chat_data.message, local_date_iso)
+                request_specs.append({
+                    "subject": selected_subject,
+                    "date_range": explicit_date_range or inferred_date_range
+                })
             else:
-                preset_subjects = get_subject_presets_for_user(current_user.id)
-                inferred_subject = detect_subject_from_message(chat_data.message, preset_subjects)
-                if inferred_subject:
-                    document_content = build_subject_context(current_user.id, inferred_subject)
+                inferred_requests = infer_subject_date_requests(
+                    message=chat_data.message,
+                    preset_subjects=preset_subjects,
+                    local_date_iso=local_date_iso
+                )
+                for req in inferred_requests:
+                    request_specs.append(req)
+
+                if not request_specs:
+                    inferred_date_range = infer_date_range_from_message(chat_data.message, local_date_iso)
+                    inferred_subjects = detect_subjects_from_message(chat_data.message, preset_subjects)
+                    if inferred_subjects:
+                        for subject in inferred_subjects:
+                            request_specs.append({
+                                "subject": subject,
+                                "date_range": explicit_date_range or inferred_date_range
+                            })
+                    elif explicit_date_range or inferred_date_range:
+                        request_specs.append({
+                            "subject": None,
+                            "date_range": explicit_date_range or inferred_date_range
+                        })
+
+            context_chunks = []
+            missing_requests = []
+            for spec in request_specs:
+                subject = spec.get("subject")
+                date_range = spec.get("date_range")
+                chunk = build_filtered_context(
+                    user_id=current_user.id,
+                    subject=subject,
+                    date_range=date_range
+                )
+                if chunk:
+                    label = subject or "All subjects"
+                    context_chunks.append(f"=== Requested Notes: {label} ===\n{chunk}")
+                elif date_range:
+                    start_dt, end_exclusive = date_range
+                    date_label = f"{start_dt.date()} to {(end_exclusive - timedelta(days=1)).date()}"
+                    missing_requests.append(f"{subject or 'All subjects'} ({date_label})")
+
+            if context_chunks:
+                document_content = "\n\n".join(context_chunks)
+            elif missing_requests:
+                context_notice = (
+                    "No notes were found for: " + ", ".join(missing_requests) +
+                    ". Tell the user this briefly, then offer another range or subject."
+                )
 
         # Generate or use existing chat_id
         chat_id = chat_data.chat_id or str(uuid.uuid4())
@@ -741,8 +1036,7 @@ async def send_chat(
         # Generate chat title from first message (limited to 100 chars)
         chat_title = None
         if is_new_chat:
-            first_question = re.sub(r"\s+", " ", chat_data.message).strip()
-            chat_title = first_question[:100] if len(first_question) <= 100 else first_question[:97] + "..."
+            chat_title = generate_chat_title_from_message(chat_data.message)
 
         # Get allowed domains for web search
         res = supabase.table("allowed_sources").select("domain").eq("user_id", current_user.id).execute()
@@ -797,6 +1091,11 @@ If no external information is needed, respond with:
         messages = [
             {"role": "system", "content": "You are an AI tutor following the specified framework."},
             {"role": "system", "content": f"""
+CURRENT LOCAL DATE (authoritative):
+- ISO: {local_date_iso}
+- Readable: {local_date_long}
+- If the user asks for today's date or current date/time, use this local date context and do not guess.
+
 DOCUMENT CONTEXT:
 {document_content[:config.DOCUMENT_CONTENT_LIMIT] if document_content else "None"}
 
@@ -805,6 +1104,9 @@ EXTERNAL REFERENCE MATERIAL:
 
 INSTRUCTIONS:
 {tutor_prompt}
+
+CONTEXT AVAILABILITY NOTE:
+{context_notice if context_notice else "None"}
 """}
         ]
 
@@ -832,24 +1134,26 @@ INSTRUCTIONS:
 
         # Save messages to database
         try:
-            messages_to_insert = [
-                {
-                    "user_id": current_user.id,
-                    "topic_id": chat_data.topic_id,
-                    "chat_id": chat_id,
-                    "role": "user",
-                    "content": chat_data.message,
-                    "chat_title": chat_title  # Only set for first message
-                },
-                {
-                    "user_id": current_user.id,
-                    "topic_id": chat_data.topic_id,
-                    "chat_id": chat_id,
-                    "role": "assistant",
-                    "content": ai_text,
-                    "chat_title": chat_title  # Only set for first message
-                }
-            ]
+            user_msg = {
+                "user_id": current_user.id,
+                "topic_id": chat_data.topic_id,
+                "chat_id": chat_id,
+                "role": "user",
+                "content": chat_data.message
+            }
+            assistant_msg = {
+                "user_id": current_user.id,
+                "topic_id": chat_data.topic_id,
+                "chat_id": chat_id,
+                "role": "assistant",
+                "content": ai_text
+            }
+            # Persist title only for the first message pair in a chat.
+            if chat_title:
+                user_msg["chat_title"] = chat_title
+                assistant_msg["chat_title"] = chat_title
+
+            messages_to_insert = [user_msg, assistant_msg]
 
             supabase.table("chat_messages").insert(messages_to_insert).execute()
 
@@ -934,15 +1238,23 @@ async def list_all_chats(current_user=Depends(get_current_user)):
         seen = {}
         for row in messages.data or []:
             chat_id = row.get("chat_id")
-            if chat_id and chat_id not in seen:
-                topic_id = row.get("topic_id")
+            if not chat_id:
+                continue
+            topic_id = row.get("topic_id")
+            row_title = row.get("chat_title")
+
+            if chat_id not in seen:
                 seen[chat_id] = {
                     "chat_id": chat_id,
-                    "chat_title": row.get("chat_title"),
+                    "chat_title": row_title,
                     "topic_id": topic_id,
                     "topic_name": topic_map.get(topic_id, "Date-range notes") if topic_id else "Date-range notes",
                     "created_at": row.get("created_at")
                 }
+            else:
+                # If latest row had null title, backfill from older titled rows.
+                if not seen[chat_id].get("chat_title") and row_title:
+                    seen[chat_id]["chat_title"] = row_title
 
         return {"chats": list(seen.values())}
     except Exception as e:
@@ -1003,6 +1315,58 @@ async def get_topics(current_user=Depends(get_current_user)):
     except Exception as e:
         logger.error(f"Get topics with content error: {e}")
         return {"topics": []}
+
+
+@app.delete("/api/documents/{document_id}")
+async def delete_document(document_id: str, current_user=Depends(get_current_user)):
+    """Delete a document and its related chat messages"""
+    try:
+        doc_check = supabase.table("documents").select("id").eq("id", document_id).eq("user_id", current_user.id).execute()
+        if not doc_check.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Document not found"
+            )
+
+        supabase.table("documents").delete().eq("id", document_id).eq("user_id", current_user.id).execute()
+        supabase.table("chat_messages").delete().eq("topic_id", document_id).eq("user_id", current_user.id).execute()
+
+        logger.info(f"Document deleted by user {current_user.id}: {document_id}")
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Delete document error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to delete document"
+        )
+
+
+@app.delete("/api/chat/{chat_id}")
+async def delete_chat(chat_id: str, current_user=Depends(get_current_user)):
+    """Delete all messages in a chat thread for the current user"""
+    try:
+        chat_check = supabase.table("chat_messages").select("chat_id").eq("chat_id", chat_id).eq("user_id",
+                                                                                                   current_user.id).limit(
+            1).execute()
+        if not chat_check.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Chat not found"
+            )
+
+        supabase.table("chat_messages").delete().eq("chat_id", chat_id).eq("user_id", current_user.id).execute()
+        logger.info(f"Chat deleted by user {current_user.id}: {chat_id}")
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Delete chat error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to delete chat"
+        )
 
 
 @app.get("/api/dashboard/stats")
