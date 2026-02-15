@@ -40,45 +40,45 @@
         text-align: center;
       }
 
-      .presets-panel {
-        width: 80%;
-        margin: 0 auto 20px auto;
-        background: #fff;
-        border-radius: 8px;
-        padding: 14px;
-        box-shadow: 0 2px 6px rgba(0,0,0,0.1);
-      }
-
-      .preset-input-row {
+      .preset-action-row {
+        width: 86%;
+        margin: 0 auto 12px auto;
         display: flex;
-        gap: 8px;
-        margin-top: 10px;
+        align-items: center;
+        justify-content: space-between;
       }
 
-      .preset-input-row input {
-        flex: 1;
-        padding: 8px;
+      .preset-action-label {
+        color: #4b5563;
+        font-size: 14px;
+      }
+
+      .add-preset-btn {
+        width: 34px;
+        height: 34px;
+        border: none;
+        border-radius: 999px;
+        background: #2563eb;
+        color: #fff;
+        font-size: 22px;
+        line-height: 1;
+        cursor: pointer;
       }
     </style>
 </head>
 <body>
 <div class="main-content">
   <h1>Topics</h1>
-  <div class="presets-panel">
-    <strong>Subject presets</strong>
-    <div id="subject-preset-list"></div>
-    <div class="preset-input-row">
-      <input id="new-subject-input" placeholder="Add new subject preset">
-      <button onclick="addSubjectPreset()">Add</button>
-    </div>
+  <div class="preset-action-row">
+    <div class="preset-action-label">Need a new subject preset?</div>
+    <button class="add-preset-btn" onclick="addSubjectPreset()">+</button>
   </div>
   <div id="topics-container"></div>
 </div>
 
-<script src="/static/script.js?v=20260215-2"></script>
+<script src="/static/script.js?v=20260215-3"></script>
 <script>
     get_usersAndtopic("/api/get_topics");
-    loadSubjectPresets();
 </script>
 <button class="go_back-btn" onclick="window.location.href='/dashboard'">Go back to dashboard</button>
 </body>

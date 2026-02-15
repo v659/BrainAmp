@@ -151,6 +151,10 @@ class RefreshTokenData(BaseModel):
     refresh_token: str = Field(..., min_length=10)
 
 
+class UpdateDocumentSubjectData(BaseModel):
+    subject: str = Field(..., min_length=2, max_length=60)
+
+
 def normalize_subject(subject: str) -> str:
     return re.sub(r"\s+", " ", subject.strip()).title()
 
@@ -1340,6 +1344,36 @@ async def delete_document(document_id: str, current_user=Depends(get_current_use
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Failed to delete document"
+        )
+
+
+@app.patch("/api/documents/{document_id}/subject")
+async def update_document_subject(
+        document_id: str,
+        data: UpdateDocumentSubjectData,
+        current_user=Depends(get_current_user)
+):
+    """Move a document to another subject"""
+    try:
+        subject = normalize_subject(data.subject)
+        doc_check = supabase.table("documents").select("id").eq("id", document_id).eq("user_id", current_user.id).execute()
+        if not doc_check.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Document not found"
+            )
+
+        supabase.table("documents").update({"subject": subject}).eq("id", document_id).eq("user_id",
+                                                                                          current_user.id).execute()
+        logger.info(f"Document subject updated by user {current_user.id}: {document_id} -> {subject}")
+        return {"success": True, "subject": subject}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Update document subject error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to update document subject"
         )
 
 

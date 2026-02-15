@@ -508,137 +508,146 @@ async function get_usersAndtopic(api) {
     }
 
     try {
-        const res = await authenticatedFetch(api);
+        const [topicsRes, presetsRes] = await Promise.all([
+            authenticatedFetch(api),
+            authenticatedFetch("/api/subject-presets")
+        ]);
 
-        if (!res.ok) {
-            throw new Error(`HTTP ${res.status}`);
-        }
+        if (!topicsRes.ok) throw new Error(`HTTP ${topicsRes.status}`);
 
-        const data = await res.json();
+        const topicsData = await topicsRes.json();
+        const presetsData = presetsRes.ok ? await presetsRes.json() : { presets: [] };
         const container = document.getElementById("topics-container");
-
         if (!container) return;
-
         container.innerHTML = "";
 
-        let topics = data.topics;
-        if (!topics && Array.isArray(data.result_topics)) {
-            topics = data.result_topics.map((t, i) => ({
+        let topics = topicsData.topics;
+        if (!topics && Array.isArray(topicsData.result_topics)) {
+            topics = topicsData.result_topics.map((t, i) => ({
                 topic: t.topic,
-                content: data.result_content?.[i]?.content || "",
+                content: topicsData.result_content?.[i]?.content || "",
                 subject: "Uncategorized",
                 created_at: null
             }));
         }
+        topics = topics || [];
 
-        if (!topics || topics.length === 0) {
-            container.innerHTML = `
-                <div style="padding: 20px; text-align: center; color: #999;">
-                    No topics yet. Upload a document to get started!
-                </div>
-            `;
-            return;
+        const presetSubjects = (presetsData.presets || [])
+            .map(p => p.subject)
+            .filter(Boolean);
+        const subjectOrder = [...presetSubjects];
+
+        topics.forEach(t => {
+            const s = t.subject || "Uncategorized";
+            if (!subjectOrder.includes(s)) subjectOrder.push(s);
+        });
+
+        if (subjectOrder.length === 0) {
+            subjectOrder.push("Uncategorized");
         }
 
         const grouped = {};
-        topics.forEach((topicObj) => {
-            const subject = topicObj.subject || "Uncategorized";
-            if (!grouped[subject]) grouped[subject] = [];
-            grouped[subject].push(topicObj);
+        subjectOrder.forEach(s => grouped[s] = []);
+        topics.forEach(t => {
+            const s = t.subject || "Uncategorized";
+            if (!grouped[s]) grouped[s] = [];
+            grouped[s].push(t);
         });
 
-        Object.keys(grouped).sort().forEach(subject => {
-            const sectionTitle = document.createElement("h3");
-            sectionTitle.textContent = subject;
-            sectionTitle.style.cssText = `
-                width: 80%;
-                margin: 20px auto 8px auto;
-                font-size: 1rem;
-                color: #374151;
+        subjectOrder.forEach(subject => {
+            const section = document.createElement("div");
+            section.style.cssText = `
+                width: 86%;
+                margin: 14px auto;
+                border: 1px solid #e5e7eb;
+                border-radius: 10px;
+                background: #ffffff;
+                padding: 10px;
             `;
-            container.appendChild(sectionTitle);
+            section.dataset.subject = subject;
 
-            grouped[subject].forEach((topicObj) => {
-                const topic = topicObj.topic || "Untitled";
-                const content = topicObj.content || "No content available";
-                const createdAt = topicObj.created_at ? new Date(topicObj.created_at).toLocaleDateString() : "Unknown date";
-                const documentId = topicObj.id;
+            const title = document.createElement("h3");
+            title.textContent = subject;
+            title.style.cssText = "margin:4px 0 10px 0;font-size:1rem;color:#111827;";
+            section.appendChild(title);
 
-                const wrapper = document.createElement("div");
-                wrapper.style.cssText = `
-                    width: 80%;
-                    margin: 10px auto;
-                    border-radius: 8px;
-                    background: #fff;
-                    box-shadow: 0 2px 6px rgba(0,0,0,0.1);
-                `;
+            const dropZone = document.createElement("div");
+            dropZone.style.cssText = "min-height:24px;padding:2px;";
+            dropZone.ondragover = (e) => {
+                e.preventDefault();
+                dropZone.style.background = "#eff6ff";
+            };
+            dropZone.ondragleave = () => {
+                dropZone.style.background = "transparent";
+            };
+            dropZone.ondrop = async (e) => {
+                e.preventDefault();
+                dropZone.style.background = "transparent";
+                const documentId = e.dataTransfer.getData("text/plain");
+                if (documentId) await moveDocumentToSubject(documentId, subject);
+            };
 
-                const headerRow = document.createElement("div");
-                headerRow.style.cssText = `
-                    display: flex;
-                    align-items: center;
-                    gap: 8px;
-                `;
+            const docs = grouped[subject] || [];
+            if (docs.length === 0) {
+                const empty = document.createElement("div");
+                empty.textContent = "No notes for this topic.";
+                empty.style.cssText = "color:#6b7280;font-size:14px;padding:6px 0;";
+                dropZone.appendChild(empty);
+            } else {
+                docs.forEach(topicObj => {
+                    const topic = topicObj.topic || "Untitled";
+                    const content = topicObj.content || "No content available";
+                    const createdAt = topicObj.created_at ? new Date(topicObj.created_at).toLocaleDateString() : "Unknown date";
+                    const documentId = topicObj.id;
 
-                const button = document.createElement("button");
-                button.textContent = `${topic} (${createdAt})`;
-                button.style.cssText = `
-                    flex: 1;
-                    padding: 14px;
-                    font-size: 1rem;
-                    text-align: left;
-                    border: none;
-                    background: transparent;
-                    cursor: pointer;
-                    font-weight: 600;
-                `;
+                    const card = document.createElement("div");
+                    card.style.cssText = "margin:8px 0;border:1px solid #e5e7eb;border-radius:8px;background:#fafafa;";
+                    if (documentId) {
+                        card.draggable = true;
+                        card.ondragstart = (e) => {
+                            e.dataTransfer.setData("text/plain", documentId);
+                            e.dataTransfer.effectAllowed = "move";
+                        };
+                    }
 
-                const deleteBtn = document.createElement("button");
-                deleteBtn.textContent = "Delete";
-                deleteBtn.style.cssText = `
-                    margin-right: 10px;
-                    padding: 8px 10px;
-                    border: none;
-                    border-radius: 6px;
-                    background: #dc2626;
-                    color: #fff;
-                    cursor: pointer;
-                    font-size: 12px;
-                `;
-                deleteBtn.onclick = (e) => {
-                    e.stopPropagation();
-                    deleteDocument(documentId, topic);
-                };
+                    const row = document.createElement("div");
+                    row.style.cssText = "display:flex;align-items:center;gap:8px;";
 
-                const contentDiv = document.createElement("div");
-                contentDiv.style.cssText = `
-                    display: none;
-                    padding: 14px;
-                    border-top: 1px solid #ddd;
-                `;
+                    const button = document.createElement("button");
+                    button.textContent = `${topic} (${createdAt})`;
+                    button.style.cssText = "flex:1;padding:12px;text-align:left;border:none;background:transparent;cursor:pointer;font-weight:600;";
 
-                const pre = document.createElement("pre");
-                pre.textContent = content;
-                pre.style.cssText = `
-                    white-space: pre-wrap;
-                    margin: 0;
-                    max-height: 400px;
-                    overflow-y: auto;
-                `;
+                    const deleteBtn = document.createElement("button");
+                    deleteBtn.textContent = "Delete";
+                    deleteBtn.style.cssText = "margin-right:8px;padding:6px 10px;border:none;border-radius:6px;background:#dc2626;color:#fff;cursor:pointer;font-size:12px;";
+                    deleteBtn.onclick = (e) => {
+                        e.stopPropagation();
+                        deleteDocument(documentId, topic);
+                    };
 
-                contentDiv.appendChild(pre);
+                    const contentDiv = document.createElement("div");
+                    contentDiv.style.cssText = "display:none;padding:12px;border-top:1px solid #ddd;";
 
-                button.onclick = () => {
-                    const isOpen = contentDiv.style.display === "block";
-                    contentDiv.style.display = isOpen ? "none" : "block";
-                };
+                    const pre = document.createElement("pre");
+                    pre.textContent = content;
+                    pre.style.cssText = "white-space:pre-wrap;margin:0;max-height:260px;overflow-y:auto;";
+                    contentDiv.appendChild(pre);
 
-                headerRow.appendChild(button);
-                if (documentId) headerRow.appendChild(deleteBtn);
-                wrapper.appendChild(headerRow);
-                wrapper.appendChild(contentDiv);
-                container.appendChild(wrapper);
-            });
+                    button.onclick = () => {
+                        const isOpen = contentDiv.style.display === "block";
+                        contentDiv.style.display = isOpen ? "none" : "block";
+                    };
+
+                    row.appendChild(button);
+                    if (documentId) row.appendChild(deleteBtn);
+                    card.appendChild(row);
+                    card.appendChild(contentDiv);
+                    dropZone.appendChild(card);
+                });
+            }
+
+            section.appendChild(dropZone);
+            container.appendChild(section);
         });
 
     } catch (err) {
@@ -651,6 +660,25 @@ async function get_usersAndtopic(api) {
                 </div>
             `;
         }
+    }
+}
+
+async function moveDocumentToSubject(documentId, subject) {
+    const token = localStorage.getItem("access_token");
+    if (!token || !documentId || !subject) return;
+
+    try {
+        const res = await authenticatedFetch(`/api/documents/${documentId}/subject`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ subject })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Failed to move note");
+        await get_usersAndtopic("/api/get_topics");
+    } catch (err) {
+        console.error("Move document subject error:", err);
+        alert(err.message || "Failed to move note");
     }
 }
 
@@ -680,70 +708,15 @@ async function deleteDocument(documentId, topicName = "this document") {
 }
 
 async function loadSubjectPresets() {
-    const token = localStorage.getItem("access_token");
-    const listDiv = document.getElementById("subject-preset-list");
-    if (!listDiv) return;
-    if (!token) {
-        listDiv.innerHTML = `<div style="color:#dc2626;padding:8px 0;">Not logged in.</div>`;
-        return;
-    }
-
-    try {
-        const res = await authenticatedFetch("/api/subject-presets");
-        if (!res.ok) throw new Error("Failed to load subject presets");
-        const data = await res.json();
-        const presets = data.presets || [];
-
-        listDiv.innerHTML = "";
-        if (presets.length === 0) {
-            listDiv.innerHTML = `<div style="color:#6b7280;padding:8px 0;">No presets found</div>`;
-            return;
-        }
-
-        presets.forEach((preset, index) => {
-            const row = document.createElement("div");
-            row.style.cssText = "display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #eee;";
-
-            const name = document.createElement("span");
-            name.textContent = preset.subject;
-            row.appendChild(name);
-
-            if (preset.id) {
-                const controls = document.createElement("div");
-                controls.style.cssText = "display:flex;gap:6px;";
-                const upBtn = document.createElement("button");
-                upBtn.textContent = "Up";
-                upBtn.style.cssText = "padding:6px 10px;cursor:pointer;";
-                upBtn.disabled = index === 0;
-                upBtn.onclick = () => reorderSubjectPreset(index, -1, presets);
-
-                const downBtn = document.createElement("button");
-                downBtn.textContent = "Down";
-                downBtn.style.cssText = "padding:6px 10px;cursor:pointer;";
-                downBtn.disabled = index === presets.length - 1;
-                downBtn.onclick = () => reorderSubjectPreset(index, 1, presets);
-
-                controls.appendChild(upBtn);
-                controls.appendChild(downBtn);
-                row.appendChild(controls);
-            }
-
-            listDiv.appendChild(row);
-        });
-    } catch (err) {
-        console.error("Load subject presets error:", err);
-        listDiv.innerHTML = DEFAULT_SUBJECT_PRESETS.map(name =>
-            `<div style="padding:8px 0;border-bottom:1px solid #eee;">${sanitizeInput(name)}</div>`
-        ).join('');
-    }
+    // No separate presets panel anymore; topics render now includes subject sections.
 }
 
 async function addSubjectPreset() {
     const token = localStorage.getItem("access_token");
     const input = document.getElementById("new-subject-input");
-    if (!token || !input) return;
+    if (!token) return;
 
-    const subject = input.value.trim();
+    const subject = input ? input.value.trim() : (prompt("Enter new subject preset") || "").trim();
     if (!subject) return;
 
     try {
@@ -755,38 +728,11 @@ async function addSubjectPreset() {
             body: JSON.stringify({ subject })
         });
         if (!res.ok) throw new Error("Failed to add subject preset");
-        input.value = "";
-        await loadSubjectPresets();
+        if (input) input.value = "";
+        await get_usersAndtopic("/api/get_topics");
     } catch (err) {
         console.error("Add subject preset error:", err);
         alert("Failed to add subject preset");
-    }
-}
-
-async function reorderSubjectPreset(index, direction, presets) {
-    const token = localStorage.getItem("access_token");
-    if (!token) return;
-    const target = index + direction;
-    if (target < 0 || target >= presets.length) return;
-
-    const cloned = [...presets];
-    const [moved] = cloned.splice(index, 1);
-    cloned.splice(target, 0, moved);
-    const presetIds = cloned.map(p => p.id).filter(Boolean);
-
-    try {
-        const res = await authenticatedFetch("/api/subject-presets/reorder", {
-            method: "PUT",
-            headers: {
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({ preset_ids: presetIds })
-        });
-        if (!res.ok) throw new Error("Failed to reorder");
-        await loadSubjectPresets();
-    } catch (err) {
-        console.error("Reorder subject presets error:", err);
-        alert("Failed to reorder subject presets");
     }
 }
 
