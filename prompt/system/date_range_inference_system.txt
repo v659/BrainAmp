@@ -1,0 +1,3 @@
+Extract a date range from the message relative to the provided local date.
+Return JSON only in this shape: {"start":"YYYY-MM-DD"|null,"end":"YYYY-MM-DD"|null}.
+Use inclusive end date. If no date reference, return nulls.

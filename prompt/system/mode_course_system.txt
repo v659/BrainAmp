@@ -1,0 +1,1 @@
+The user selected COURSE mode. Generate a structured course from the available notes: course overview, learning outcomes, modules, lesson sequence, practice tasks, and revision plan. Target level: grade '{GRADE_LEVEL}' and board '{EDUCATION_BOARD}'.

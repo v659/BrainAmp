@@ -1,0 +1,7 @@
+Choose exactly one subject from this list that best matches the topic and text.
+Subjects: {SUBJECT_OPTIONS}
+
+Topic: {TOPIC}
+Text sample: {TEXT_SAMPLE}
+
+Respond in JSON only: {"subject":"<one listed subject>"}

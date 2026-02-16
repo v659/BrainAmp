@@ -1,12 +1,13 @@
 import os
 import logging
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
 import tempfile
 import uuid
 import re
 import json
 import subprocess
+from pathlib import Path
 
 from fastapi import FastAPI, Request, Header, HTTPException, Depends, UploadFile, File, status
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -62,6 +63,13 @@ DEFAULT_SUBJECT_PRESETS = [
     "Chemistry",
     "Economics",
 ]
+DEFAULT_ACCOUNT_SETTINGS = {
+    "web_search_enabled": True,
+    "save_chat_history": True,
+    "study_reminders_enabled": False,
+    "grade_level": "",
+    "education_board": "",
+}
 
 # Validate configuration
 if not all([config.SUPABASE_URL, config.SUPABASE_ANON_KEY, config.OPENAI_API_KEY]):
@@ -90,6 +98,21 @@ app.add_middleware(
 # Mount static files and templates
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
+PROMPT_DIR = Path("prompt")
+PROMPT_CACHE: Dict[str, str] = {}
+
+
+def load_prompt_text(relative_path: str, replacements: Optional[Dict[str, str]] = None) -> str:
+    key = relative_path
+    if key not in PROMPT_CACHE:
+        path = PROMPT_DIR / relative_path
+        with open(path, "r", encoding="utf-8") as f:
+            PROMPT_CACHE[key] = f.read()
+    content = PROMPT_CACHE[key]
+    if replacements:
+        for token, value in replacements.items():
+            content = content.replace(token, value)
+    return content
 
 
 # Pydantic Models with Validation
@@ -121,11 +144,30 @@ class ChatMessage(BaseModel):
     topic_id: Optional[str] = Field(None, max_length=100)
     chat_id: Optional[str] = Field(None, max_length=100)
     subject: Optional[str] = Field(None, max_length=60)
+    chat_mode: Optional[str] = Field(None, max_length=20)
     message: str = Field(..., min_length=1, max_length=2000)
 
 
 class UpdateProfileData(BaseModel):
     display_name: str = Field(..., min_length=1, max_length=50)
+
+
+class AccountSettingsData(BaseModel):
+    web_search_enabled: bool = True
+    save_chat_history: bool = True
+    study_reminders_enabled: bool = False
+    grade_level: Optional[str] = Field("", max_length=30)
+    education_board: Optional[str] = Field("", max_length=50)
+
+
+class UpdatePasswordData(BaseModel):
+    new_password: str = Field(..., min_length=8, max_length=128)
+
+
+class LearningAssetData(BaseModel):
+    title: str = Field(..., min_length=2, max_length=120)
+    content: str = Field(..., min_length=10, max_length=12000)
+    chat_id: Optional[str] = Field(None, max_length=100)
 
 
 class AddSourceData(BaseModel):
@@ -157,6 +199,35 @@ class UpdateDocumentSubjectData(BaseModel):
 
 def normalize_subject(subject: str) -> str:
     return re.sub(r"\s+", " ", subject.strip()).title()
+
+
+def get_account_settings_from_metadata(user_metadata: dict) -> dict:
+    settings = user_metadata.get("account_settings") if isinstance(user_metadata, dict) else None
+    if not isinstance(settings, dict):
+        return DEFAULT_ACCOUNT_SETTINGS.copy()
+
+    return {
+        "web_search_enabled": bool(settings.get("web_search_enabled", DEFAULT_ACCOUNT_SETTINGS["web_search_enabled"])),
+        "save_chat_history": bool(settings.get("save_chat_history", DEFAULT_ACCOUNT_SETTINGS["save_chat_history"])),
+        "study_reminders_enabled": bool(
+            settings.get("study_reminders_enabled", DEFAULT_ACCOUNT_SETTINGS["study_reminders_enabled"])
+        ),
+        "grade_level": str(settings.get("grade_level", DEFAULT_ACCOUNT_SETTINGS["grade_level"]) or "").strip(),
+        "education_board": str(settings.get("education_board", DEFAULT_ACCOUNT_SETTINGS["education_board"]) or "").strip(),
+    }
+
+
+def get_learning_assets_from_metadata(user_metadata: dict) -> Dict[str, List[Dict[str, Any]]]:
+    raw = user_metadata.get("learning_assets") if isinstance(user_metadata, dict) else None
+    if not isinstance(raw, dict):
+        return {"courses": [], "quizzes": []}
+
+    courses = raw.get("courses", [])
+    quizzes = raw.get("quizzes", [])
+    return {
+        "courses": courses if isinstance(courses, list) else [],
+        "quizzes": quizzes if isinstance(quizzes, list) else [],
+    }
 
 
 def try_parse_date(date_text: str) -> Optional[datetime]:
@@ -199,21 +270,24 @@ def parse_date_range_from_message(message: str) -> Optional[tuple[datetime, date
 def infer_date_range_from_message(message: str, local_date_iso: str) -> Optional[tuple[datetime, datetime]]:
     """Use the model to infer date windows like yesterday/last week/tomorrow from user text."""
     try:
+        system_prompt = load_prompt_text("system/date_range_inference_system.txt")
+        user_prompt = load_prompt_text(
+            "system/date_range_inference_user.txt",
+            {
+                "{LOCAL_DATE_ISO}": local_date_iso,
+                "{MESSAGE}": message
+            }
+        )
         response = openai_client.chat.completions.create(
             model=config.OPENAI_MODEL,
             messages=[
                 {
                     "role": "system",
-                    "content": (
-                        "Extract a date range from the message relative to the provided local date. "
-                        "Return JSON only in this shape: "
-                        "{\"start\":\"YYYY-MM-DD\"|null,\"end\":\"YYYY-MM-DD\"|null}. "
-                        "Use inclusive end date. If no date reference, return nulls."
-                    )
+                    "content": system_prompt
                 },
                 {
                     "role": "user",
-                    "content": f"Local date: {local_date_iso}\nMessage: {message}"
+                    "content": user_prompt
                 }
             ],
             max_tokens=60,
@@ -297,19 +371,21 @@ def classify_subject(topic: str, content: str, preset_subjects: List[str]) -> st
     option_text = ", ".join(options)
     sample = content[:1200]
 
-    prompt = (
-        "Choose exactly one subject from this list that best matches the topic and text.\n"
-        f"Subjects: {option_text}\n\n"
-        f"Topic: {topic}\n"
-        f"Text sample: {sample}\n\n"
-        "Respond in JSON only: {\"subject\":\"<one listed subject>\"}"
+    prompt = load_prompt_text(
+        "system/subject_classifier_user.txt",
+        {
+            "{SUBJECT_OPTIONS}": option_text,
+            "{TOPIC}": topic,
+            "{TEXT_SAMPLE}": sample,
+        }
     )
 
     try:
+        system_prompt = load_prompt_text("system/subject_classifier_system.txt")
         response = openai_client.chat.completions.create(
             model=config.OPENAI_MODEL,
             messages=[
-                {"role": "system", "content": "You classify study notes into a single predefined subject."},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt}
             ],
             max_tokens=50,
@@ -418,26 +494,25 @@ def infer_subject_date_requests(message: str, preset_subjects: List[str], local_
     options = [normalize_subject(s) for s in preset_subjects] if preset_subjects else []
 
     try:
+        system_prompt = load_prompt_text("system/request_inference_system.txt")
+        user_prompt = load_prompt_text(
+            "system/request_inference_user.txt",
+            {
+                "{ALLOWED_SUBJECTS}": ", ".join(options) if options else "None",
+                "{LOCAL_DATE_ISO}": local_date_iso,
+                "{MESSAGE}": message,
+            }
+        )
         response = openai_client.chat.completions.create(
             model=config.OPENAI_MODEL,
             messages=[
                 {
                     "role": "system",
-                    "content": (
-                        "Extract note requests from the user message. "
-                        "Return JSON only in shape: "
-                        "{\"requests\":[{\"subject\":\"<one allowed subject or null>\","
-                        "\"start\":\"YYYY-MM-DD\"|null,\"end\":\"YYYY-MM-DD\"|null}]}. "
-                        "Use inclusive end date. Use provided local date for relative terms."
-                    )
+                    "content": system_prompt
                 },
                 {
                     "role": "user",
-                    "content": (
-                        f"Allowed subjects: {', '.join(options) if options else 'None'}\n"
-                        f"Local date: {local_date_iso}\n"
-                        f"Message: {message}"
-                    )
+                    "content": user_prompt
                 }
             ],
             max_tokens=220,
@@ -551,10 +626,11 @@ def generate_chat_title_from_message(message: str) -> str:
         return "New chat"
 
     try:
+        system_prompt = load_prompt_text("system/chat_title_system.txt")
         response = openai_client.chat.completions.create(
             model=config.OPENAI_MODEL,
             messages=[
-                {"role": "system", "content": "Generate a concise chat title (max 8 words). Return only the title text."},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": cleaned}
             ],
             max_tokens=24,
@@ -775,6 +851,188 @@ async def update_profile(
         )
 
 
+@app.post("/api/account-settings")
+async def update_account_settings(
+        data: AccountSettingsData,
+        current_user=Depends(get_current_user)
+):
+    """Update persisted account settings in user metadata"""
+    try:
+        user_metadata = current_user.user_metadata or {}
+        merged_metadata = {
+            **user_metadata,
+            "account_settings": {
+                "web_search_enabled": data.web_search_enabled,
+                "save_chat_history": data.save_chat_history,
+                "study_reminders_enabled": data.study_reminders_enabled,
+                "grade_level": (data.grade_level or "").strip(),
+                "education_board": (data.education_board or "").strip(),
+            }
+        }
+
+        result = supabase.auth.update_user({"data": merged_metadata})
+        if result and result.user:
+            logger.info(f"Account settings updated for user: {current_user.id}")
+            return {"success": True, "account_settings": merged_metadata["account_settings"]}
+
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"error": "Failed to update account settings"}
+        )
+    except Exception as e:
+        logger.error(f"Account settings update error: {e}")
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"error": "Failed to update account settings. Please try again."}
+        )
+
+
+@app.get("/api/learning-assets")
+async def list_learning_assets(current_user=Depends(get_current_user)):
+    """Get saved courses and quizzes for the current user"""
+    user_metadata = current_user.user_metadata or {}
+    assets = get_learning_assets_from_metadata(user_metadata)
+    return assets
+
+
+@app.post("/api/learning-assets/course")
+async def save_course_asset(
+        data: LearningAssetData,
+        current_user=Depends(get_current_user)
+):
+    """Save a generated course to user metadata"""
+    try:
+        user_metadata = current_user.user_metadata or {}
+        assets = get_learning_assets_from_metadata(user_metadata)
+        new_item = {
+            "id": str(uuid.uuid4()),
+            "title": data.title.strip(),
+            "content": data.content.strip(),
+            "chat_id": data.chat_id,
+            "created_at": datetime.now().isoformat()
+        }
+        assets["courses"] = [new_item] + assets["courses"][:24]
+
+        merged_metadata = {**user_metadata, "learning_assets": assets}
+        result = supabase.auth.update_user({"data": merged_metadata})
+        if result and result.user:
+            return {"success": True, "course": new_item}
+
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"error": "Failed to save course"}
+        )
+    except Exception as e:
+        logger.error(f"Save course asset error: {e}")
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"error": "Failed to save course. Please try again."}
+        )
+
+
+@app.post("/api/learning-assets/quiz")
+async def save_quiz_asset(
+        data: LearningAssetData,
+        current_user=Depends(get_current_user)
+):
+    """Save a generated quiz to user metadata"""
+    try:
+        user_metadata = current_user.user_metadata or {}
+        assets = get_learning_assets_from_metadata(user_metadata)
+        new_item = {
+            "id": str(uuid.uuid4()),
+            "title": data.title.strip(),
+            "content": data.content.strip(),
+            "chat_id": data.chat_id,
+            "created_at": datetime.now().isoformat()
+        }
+        assets["quizzes"] = [new_item] + assets["quizzes"][:24]
+
+        merged_metadata = {**user_metadata, "learning_assets": assets}
+        result = supabase.auth.update_user({"data": merged_metadata})
+        if result and result.user:
+            return {"success": True, "quiz": new_item}
+
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"error": "Failed to save quiz"}
+        )
+    except Exception as e:
+        logger.error(f"Save quiz asset error: {e}")
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"error": "Failed to save quiz. Please try again."}
+        )
+
+
+@app.delete("/api/learning-assets/course/{asset_id}")
+async def delete_course_asset(asset_id: str, current_user=Depends(get_current_user)):
+    """Delete one saved course"""
+    try:
+        user_metadata = current_user.user_metadata or {}
+        assets = get_learning_assets_from_metadata(user_metadata)
+        courses = assets["courses"]
+        filtered = [item for item in courses if str(item.get("id")) != asset_id]
+        if len(filtered) == len(courses):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Course not found")
+
+        assets["courses"] = filtered
+        merged_metadata = {**user_metadata, "learning_assets": assets}
+        supabase.auth.update_user({"data": merged_metadata})
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Delete course asset error: {e}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to delete course")
+
+
+@app.delete("/api/learning-assets/quiz/{asset_id}")
+async def delete_quiz_asset(asset_id: str, current_user=Depends(get_current_user)):
+    """Delete one saved quiz"""
+    try:
+        user_metadata = current_user.user_metadata or {}
+        assets = get_learning_assets_from_metadata(user_metadata)
+        quizzes = assets["quizzes"]
+        filtered = [item for item in quizzes if str(item.get("id")) != asset_id]
+        if len(filtered) == len(quizzes):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Quiz not found")
+
+        assets["quizzes"] = filtered
+        merged_metadata = {**user_metadata, "learning_assets": assets}
+        supabase.auth.update_user({"data": merged_metadata})
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Delete quiz asset error: {e}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to delete quiz")
+
+
+@app.post("/api/change-password")
+async def change_password(
+        data: UpdatePasswordData,
+        current_user=Depends(get_current_user)
+):
+    """Change account password for authenticated user"""
+    try:
+        result = supabase.auth.update_user({"password": data.new_password})
+        if result and result.user:
+            logger.info(f"Password updated for user: {current_user.id}")
+            return {"success": True}
+
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"error": "Failed to update password"}
+        )
+    except Exception as e:
+        logger.error(f"Password update error: {e}")
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"error": "Failed to update password. Please try again."}
+        )
+
+
 @app.post("/api/refresh")
 async def refresh_access_token(data: RefreshTokenData):
     """Refresh access token using Supabase refresh token."""
@@ -803,14 +1061,17 @@ async def refresh_access_token(data: RefreshTokenData):
 @app.get("/api/me")
 async def get_me(current_user=Depends(get_current_user)):
     """Get current user information"""
-    display_name = current_user.user_metadata.get("display_name", "User")
+    user_metadata = current_user.user_metadata or {}
+    display_name = user_metadata.get("display_name", "User")
     if not display_name or display_name == "User":
         display_name = current_user.email.split('@')[0]
+    account_settings = get_account_settings_from_metadata(user_metadata)
 
     return {
         "user_id": current_user.id,
         "email": current_user.email,
-        "display_name": display_name
+        "display_name": display_name,
+        "account_settings": account_settings
     }
 
 
@@ -885,16 +1146,16 @@ async def upload_docs(
             )
 
         # Extract topic using AI
-        with open("prompt/topic_extraction_prompt.md", "r") as f:
-            prompt_template = f.read()
+        prompt_template = load_prompt_text("topic_extraction_prompt.md")
 
         formatted_prompt = prompt_template.replace("{TEXT}", combined_text[:5000])  # Limit context
 
         try:
+            topic_extraction_system = load_prompt_text("system/topic_extraction_system.txt")
             response = openai_client.chat.completions.create(
                 model=config.OPENAI_MODEL,
                 messages=[
-                    {"role": "system", "content": "You are a topic extraction assistant."},
+                    {"role": "system", "content": topic_extraction_system},
                     {"role": "user", "content": formatted_prompt}
                 ],
                 max_tokens=100,
@@ -957,6 +1218,20 @@ async def send_chat(
 ):
     """Send chat message and get AI response"""
     try:
+        user_metadata = current_user.user_metadata or {}
+        account_settings = get_account_settings_from_metadata(user_metadata)
+        chat_mode = (chat_data.chat_mode or "fundamentals").strip().lower()
+        if chat_mode not in {"fundamentals", "course", "quiz"}:
+            chat_mode = "fundamentals"
+        if chat_mode == "course":
+            grade_level = (account_settings.get("grade_level") or "").strip()
+            education_board = (account_settings.get("education_board") or "").strip()
+            if not grade_level or not education_board:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Please set your Grade and Board in Settings before using course mode."
+                )
+
         # Load document context from a selected topic, selected/derived subject, or requested date range.
         local_date_iso, local_date_long = get_terminal_datetime_context()
         document_content = ""
@@ -1048,17 +1323,11 @@ async def send_chat(
 
         # Determine if web search is needed
         web_context = ""
-        if allowed_domains:
-            domain_selection_prompt = f"""
-You may request information from EXACTLY ONE of the following allowed domains:
-{", ".join(allowed_domains)}
-
-If external information is useful, respond ONLY in valid JSON:
-{{"domain": "<one allowed domain>", "query": "<search query>"}}
-
-If no external information is needed, respond with:
-{{"domain": null}}
-"""
+        if account_settings.get("web_search_enabled", True) and allowed_domains:
+            domain_selection_prompt = load_prompt_text(
+                "system/domain_selection_system.md",
+                {"{ALLOWED_DOMAINS}": ", ".join(allowed_domains)}
+            )
 
             try:
                 selection = openai_client.chat.completions.create(
@@ -1088,30 +1357,41 @@ If no external information is needed, respond with:
             "created_at", desc=False).limit(config.CHAT_HISTORY_LIMIT).execute()
 
         # Load tutor prompt
-        with open("prompt/prompt.md") as f:
-            tutor_prompt = f.read()
+        tutor_prompt = load_prompt_text("prompt.md")
+
+        if chat_mode == "course":
+            grade_level = account_settings.get("grade_level", "")
+            education_board = account_settings.get("education_board", "")
+            mode_instruction = load_prompt_text(
+                "system/mode_course_system.txt",
+                {
+                    "{GRADE_LEVEL}": grade_level,
+                    "{EDUCATION_BOARD}": education_board
+                }
+            )
+        elif chat_mode == "quiz":
+            mode_instruction = load_prompt_text("system/mode_quiz_system.txt")
+        else:
+            mode_instruction = load_prompt_text("system/mode_fundamentals_system.txt")
+
+        tutor_role_prompt = load_prompt_text("system/tutor_role_system.txt")
+        context_system_prompt = load_prompt_text(
+            "system/chat_context_system.md",
+            {
+                "{LOCAL_DATE_ISO}": local_date_iso,
+                "{LOCAL_DATE_LONG}": local_date_long,
+                "{DOCUMENT_CONTEXT}": document_content[:config.DOCUMENT_CONTENT_LIMIT] if document_content else "None",
+                "{WEB_CONTEXT}": web_context[:config.WEB_CONTEXT_LIMIT] if web_context else "None",
+                "{TUTOR_PROMPT}": tutor_prompt,
+                "{CONTEXT_NOTICE}": context_notice if context_notice else "None",
+            }
+        )
 
         # Prepare messages
         messages = [
-            {"role": "system", "content": "You are an AI tutor following the specified framework."},
-            {"role": "system", "content": f"""
-CURRENT LOCAL DATE (authoritative):
-- ISO: {local_date_iso}
-- Readable: {local_date_long}
-- If the user asks for today's date or current date/time, use this local date context and do not guess.
-
-DOCUMENT CONTEXT:
-{document_content[:config.DOCUMENT_CONTENT_LIMIT] if document_content else "None"}
-
-EXTERNAL REFERENCE MATERIAL:
-{web_context[:config.WEB_CONTEXT_LIMIT] if web_context else "None"}
-
-INSTRUCTIONS:
-{tutor_prompt}
-
-CONTEXT AVAILABILITY NOTE:
-{context_notice if context_notice else "None"}
-"""}
+            {"role": "system", "content": tutor_role_prompt},
+            {"role": "system", "content": mode_instruction},
+            {"role": "system", "content": context_system_prompt}
         ]
 
         for m in history.data or []:
@@ -1137,33 +1417,34 @@ CONTEXT AVAILABILITY NOTE:
             )
 
         # Save messages to database
-        try:
-            user_msg = {
-                "user_id": current_user.id,
-                "topic_id": chat_data.topic_id,
-                "chat_id": chat_id,
-                "role": "user",
-                "content": chat_data.message
-            }
-            assistant_msg = {
-                "user_id": current_user.id,
-                "topic_id": chat_data.topic_id,
-                "chat_id": chat_id,
-                "role": "assistant",
-                "content": ai_text
-            }
-            # Persist title only for the first message pair in a chat.
-            if chat_title:
-                user_msg["chat_title"] = chat_title
-                assistant_msg["chat_title"] = chat_title
+        if account_settings.get("save_chat_history", True):
+            try:
+                user_msg = {
+                    "user_id": current_user.id,
+                    "topic_id": chat_data.topic_id,
+                    "chat_id": chat_id,
+                    "role": "user",
+                    "content": chat_data.message
+                }
+                assistant_msg = {
+                    "user_id": current_user.id,
+                    "topic_id": chat_data.topic_id,
+                    "chat_id": chat_id,
+                    "role": "assistant",
+                    "content": ai_text
+                }
+                # Persist title only for the first message pair in a chat.
+                if chat_title:
+                    user_msg["chat_title"] = chat_title
+                    assistant_msg["chat_title"] = chat_title
 
-            messages_to_insert = [user_msg, assistant_msg]
+                messages_to_insert = [user_msg, assistant_msg]
 
-            supabase.table("chat_messages").insert(messages_to_insert).execute()
+                supabase.table("chat_messages").insert(messages_to_insert).execute()
 
-            logger.info(f"Chat message saved for user {current_user.id}")
-        except Exception as e:
-            logger.error(f"Failed to save chat messages: {e}")
+                logger.info(f"Chat message saved for user {current_user.id}")
+            except Exception as e:
+                logger.error(f"Failed to save chat messages: {e}")
 
         return {
             "chat_id": chat_id,

@@ -1,0 +1,3 @@
+Allowed subjects: {ALLOWED_SUBJECTS}
+Local date: {LOCAL_DATE_ISO}
+Message: {MESSAGE}

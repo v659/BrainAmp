@@ -740,6 +740,211 @@ async function addSubjectPreset() {
 let currentTopicId = null;
 let currentChatId = null;
 let currentSubject = null;
+let currentChatMode = null;
+let currentAccountSettings = {};
+
+function getSidebarForMode(mode) {
+    if (mode === "course") return document.getElementById("course-sidebar");
+    if (mode === "quiz") return document.getElementById("quiz-sidebar");
+    return document.getElementById("chat-sidebar");
+}
+
+function switchActiveSidebar(mode) {
+    ["chat-sidebar", "course-sidebar", "quiz-sidebar"].forEach(id => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.style.display = "none";
+        el.classList.remove("collapsed");
+    });
+
+    const active = getSidebarForMode(mode);
+    if (active) active.style.display = "flex";
+    const toggleBtn = document.querySelector(".toggle-sidebar-btn");
+    if (toggleBtn) toggleBtn.style.left = "300px";
+}
+
+function updateChatPlaceholder() {
+    const input = document.getElementById("chat-input");
+    if (!input) return;
+
+    if (currentChatMode === "course") {
+        input.placeholder = "Describe what course you want from your notes (scope, pace, exam goals)...";
+    } else if (currentChatMode === "quiz") {
+        input.placeholder = "Ask for a quiz (topic, difficulty, question count, format)...";
+    } else {
+        input.placeholder = "Ask to go deeper into fundamentals (Socratic style), or ask concept questions...";
+    }
+}
+
+function updateModeNotice() {
+    const notice = document.getElementById("mode-notice");
+    if (!notice) return;
+
+    if (!currentChatMode) {
+        notice.textContent = "Choose one mode to start this chat.";
+        notice.style.color = "#b45309";
+        return;
+    }
+
+    if (currentChatMode === "course") {
+        const grade = (currentAccountSettings.grade_level || "").trim();
+        const board = (currentAccountSettings.education_board || "").trim();
+        if (!grade || !board) {
+            notice.innerHTML = `Course mode selected. Add <strong>Grade</strong> and <strong>Board</strong> in Settings for better course generation.`;
+            notice.style.color = "#b45309";
+        } else {
+            notice.textContent = `Course mode selected for Grade ${grade} | Board ${board}.`;
+            notice.style.color = "#065f46";
+        }
+        return;
+    }
+
+    if (currentChatMode === "quiz") {
+        notice.textContent = "Quiz mode selected. Responses will focus on generating question sets + answer keys.";
+        notice.style.color = "#1d4ed8";
+        return;
+    }
+
+    notice.textContent = "Fundamentals mode selected. Tutor will prioritize Socratic deep understanding.";
+    notice.style.color = "#1d4ed8";
+}
+
+function setChatMode(mode) {
+    currentChatMode = mode;
+    switchActiveSidebar(mode);
+    updateModeNotice();
+    updateChatPlaceholder();
+
+    document.querySelectorAll("[data-chat-mode]").forEach(btn => {
+        btn.style.borderColor = btn.dataset.chatMode === mode ? "#2563eb" : "#d1d5db";
+        btn.style.background = btn.dataset.chatMode === mode ? "#eff6ff" : "#fff";
+    });
+
+    if (mode === "course") {
+        loadSavedCourses();
+    } else if (mode === "quiz") {
+        loadSavedQuizzes();
+    } else {
+        loadAllChats();
+    }
+}
+
+function extractAssetTitle(text, fallbackPrefix) {
+    if (!text) return `${fallbackPrefix} ${new Date().toLocaleString()}`;
+    const first = text.split("\n").find(line => line.trim().length > 0) || text;
+    const cleaned = first.replace(/[*#`>-]/g, "").trim();
+    return cleaned.slice(0, 90) || `${fallbackPrefix} ${new Date().toLocaleString()}`;
+}
+
+async function saveLearningAsset(kind, content) {
+    const endpoint = kind === "course" ? "/api/learning-assets/course" : "/api/learning-assets/quiz";
+    const title = extractAssetTitle(content, kind === "course" ? "Course" : "Quiz");
+
+    try {
+        const res = await authenticatedFetch(endpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                title,
+                content,
+                chat_id: currentChatId
+            })
+        });
+        if (!res.ok) return;
+        if (kind === "course") {
+            await loadSavedCourses();
+        } else {
+            await loadSavedQuizzes();
+        }
+    } catch (err) {
+        console.error(`Save ${kind} error:`, err);
+    }
+}
+
+function renderAssetList(containerId, items, kind) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    container.innerHTML = "";
+
+    if (!items.length) {
+        container.innerHTML = `<div style="padding:16px;color:#6b7280;">No saved ${kind}s yet.</div>`;
+        return;
+    }
+
+    items.forEach(item => {
+        const row = document.createElement("div");
+        row.className = "chat-item";
+
+        const title = document.createElement("div");
+        title.className = "chat-item-title";
+        title.textContent = item.title || `${kind} item`;
+
+        const time = document.createElement("div");
+        time.className = "chat-item-time";
+        time.textContent = item.created_at ? new Date(item.created_at).toLocaleString() : "Saved item";
+
+        const actions = document.createElement("div");
+        actions.style.cssText = "display:flex;gap:8px;margin-top:8px;";
+
+        const viewBtn = document.createElement("button");
+        viewBtn.textContent = "View";
+        viewBtn.style.cssText = "padding:4px 8px;border:none;border-radius:6px;background:#2563eb;color:#fff;cursor:pointer;font-size:12px;";
+        viewBtn.onclick = () => {
+            clearChat();
+            addMessageToChat(kind === "course" ? "Saved Course" : "Saved Quiz", item.content || "", false);
+        };
+
+        const deleteBtn = document.createElement("button");
+        deleteBtn.textContent = "Delete";
+        deleteBtn.style.cssText = "padding:4px 8px;border:none;border-radius:6px;background:#dc2626;color:#fff;cursor:pointer;font-size:12px;";
+        deleteBtn.onclick = async () => {
+            const ok = confirm(`Delete saved ${kind} "${item.title || "item"}"?`);
+            if (!ok) return;
+            const endpoint = kind === "course" ? `/api/learning-assets/course/${item.id}` : `/api/learning-assets/quiz/${item.id}`;
+            try {
+                const res = await authenticatedFetch(endpoint, { method: "DELETE" });
+                if (!res.ok) throw new Error("Delete failed");
+                if (kind === "course") {
+                    await loadSavedCourses();
+                } else {
+                    await loadSavedQuizzes();
+                }
+            } catch (err) {
+                console.error(`Delete ${kind} error:`, err);
+                alert(`Failed to delete ${kind}.`);
+            }
+        };
+
+        actions.appendChild(viewBtn);
+        actions.appendChild(deleteBtn);
+        row.appendChild(title);
+        row.appendChild(time);
+        row.appendChild(actions);
+        container.appendChild(row);
+    });
+}
+
+async function loadSavedCourses() {
+    try {
+        const res = await authenticatedFetch("/api/learning-assets");
+        if (!res.ok) return;
+        const data = await res.json();
+        renderAssetList("course-list", data.courses || [], "course");
+    } catch (err) {
+        console.error("Load saved courses error:", err);
+    }
+}
+
+async function loadSavedQuizzes() {
+    try {
+        const res = await authenticatedFetch("/api/learning-assets");
+        if (!res.ok) return;
+        const data = await res.json();
+        renderAssetList("quiz-list", data.quizzes || [], "quiz");
+    } catch (err) {
+        console.error("Load saved quizzes error:", err);
+    }
+}
 
 async function loadChatTopics() {
     const token = localStorage.getItem("access_token");
@@ -749,19 +954,45 @@ async function loadChatTopics() {
     }
 
     try {
-        const res = await authenticatedFetch("/api/subject-presets");
+        const [presetRes, meRes] = await Promise.all([
+            authenticatedFetch("/api/subject-presets"),
+            authenticatedFetch("/api/me")
+        ]);
 
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!presetRes.ok) throw new Error(`HTTP ${presetRes.status}`);
 
-        const data = await res.json();
+        const data = await presetRes.json();
+        const me = meRes.ok ? await meRes.json() : {};
+        currentAccountSettings = me.account_settings || {};
         const presets = data.presets || [];
         const container = document.getElementById("topics-container");
 
         if (!container) return;
-
         container.innerHTML = "";
 
-        // Create optional subject selection UI
+        const modeSelector = document.createElement("div");
+        modeSelector.style.cssText = "display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-bottom:14px;";
+        modeSelector.innerHTML = `
+            <button data-chat-mode="fundamentals" style="border:1px solid #d1d5db;border-radius:10px;padding:12px;background:#fff;text-align:left;cursor:pointer;">
+                <strong>Go Deeper (Fundamentals)</strong><br><span style="font-size:12px;color:#6b7280;">Socratic + guided reasoning</span>
+            </button>
+            <button data-chat-mode="course" style="border:1px solid #d1d5db;border-radius:10px;padding:12px;background:#fff;text-align:left;cursor:pointer;">
+                <strong>Generate Course</strong><br><span style="font-size:12px;color:#6b7280;">Build course from your notes</span>
+            </button>
+            <button data-chat-mode="quiz" style="border:1px solid #d1d5db;border-radius:10px;padding:12px;background:#fff;text-align:left;cursor:pointer;">
+                <strong>Quiz Mode</strong><br><span style="font-size:12px;color:#6b7280;">Practice with generated quizzes</span>
+            </button>
+        `;
+        container.appendChild(modeSelector);
+        modeSelector.querySelectorAll("[data-chat-mode]").forEach(btn => {
+            btn.onclick = () => setChatMode(btn.dataset.chatMode);
+        });
+
+        const modeNotice = document.createElement("div");
+        modeNotice.id = "mode-notice";
+        modeNotice.style.cssText = "margin-bottom:14px;padding:10px 12px;border:1px dashed #d1d5db;border-radius:8px;background:#fff;";
+        container.appendChild(modeNotice);
+
         const topicSelect = document.createElement("select");
         topicSelect.id = "topic-select";
         topicSelect.style.cssText = `
@@ -794,7 +1025,6 @@ async function loadChatTopics() {
 
         container.appendChild(topicSelect);
 
-        // Create chat interface
         const chatMessages = document.createElement("div");
         chatMessages.id = "chat-messages";
         chatMessages.style.cssText = `
@@ -807,14 +1037,10 @@ async function loadChatTopics() {
         `;
 
         const chatInputContainer = document.createElement("div");
-        chatInputContainer.style.cssText = `
-            display: flex;
-            gap: 10px;
-        `;
+        chatInputContainer.style.cssText = `display: flex; gap: 10px;`;
 
         const chatInput = document.createElement("textarea");
         chatInput.id = "chat-input";
-        chatInput.placeholder = "Type your message (you can mention subject in text, or use date range like from 2026-01-01 to 2026-01-15)...";
         chatInput.maxLength = CONFIG.MAX_MESSAGE_LENGTH;
         chatInput.style.cssText = `
             flex: 1;
@@ -846,6 +1072,11 @@ async function loadChatTopics() {
         container.appendChild(chatMessages);
         container.appendChild(chatInputContainer);
 
+        currentChatMode = null;
+        switchActiveSidebar("fundamentals");
+        updateModeNotice();
+        updateChatPlaceholder();
+        await loadAllChats();
     } catch (err) {
         console.error("Load chat topics error:", err);
     }
@@ -901,6 +1132,19 @@ async function sendMessage() {
     const input = document.getElementById("chat-input");
     const message = input.value.trim();
 
+    if (!currentChatMode) {
+        alert("Choose a chat mode first: Fundamentals, Generate Course, or Quiz.");
+        return;
+    }
+    if (currentChatMode === "course") {
+        const grade = (currentAccountSettings.grade_level || "").trim();
+        const board = (currentAccountSettings.education_board || "").trim();
+        if (!grade || !board) {
+            alert("Set Grade and Board in Settings before using Course mode.");
+            return;
+        }
+    }
+
     if (!message) {
         alert("Please enter a message");
         return;
@@ -930,6 +1174,7 @@ async function sendMessage() {
                 topic_id: currentTopicId,
                 subject: currentSubject,
                 chat_id: currentChatId,
+                chat_mode: currentChatMode,
                 message: message
             })
         });
@@ -946,6 +1191,14 @@ async function sendMessage() {
         }
 
         addMessageToChat("AI Tutor", data.ai_response, false);
+
+        if (currentChatMode === "course") {
+            await saveLearningAsset("course", data.ai_response || "");
+        } else if (currentChatMode === "quiz") {
+            await saveLearningAsset("quiz", data.ai_response || "");
+        } else {
+            await loadAllChats();
+        }
 
     } catch (err) {
         console.error("Send message error:", err);
@@ -998,9 +1251,20 @@ async function loadSettings() {
         const user = await res.json();
         const emailInput = document.getElementById("email");
         const displayNameInput = document.getElementById("display-name");
+        const webSearchInput = document.getElementById("web-search-enabled");
+        const saveChatInput = document.getElementById("save-chat-history");
+        const remindersInput = document.getElementById("study-reminders-enabled");
+        const gradeLevelInput = document.getElementById("grade-level");
+        const educationBoardInput = document.getElementById("education-board");
+        const settings = user.account_settings || {};
 
         if (emailInput) emailInput.value = user.email || "";
         if (displayNameInput) displayNameInput.value = user.display_name || "";
+        if (webSearchInput) webSearchInput.checked = settings.web_search_enabled !== false;
+        if (saveChatInput) saveChatInput.checked = settings.save_chat_history !== false;
+        if (remindersInput) remindersInput.checked = settings.study_reminders_enabled === true;
+        if (gradeLevelInput) gradeLevelInput.value = settings.grade_level || "";
+        if (educationBoardInput) educationBoardInput.value = settings.education_board || "";
     } catch (err) {
         console.error("Load settings error:", err);
         window.location.href = "/";
@@ -1021,8 +1285,8 @@ async function updateProfile() {
         return;
     }
 
-    const token = localStorage.getItem("access_token");
-    const btn = document.querySelector('.btn-save');
+    const btn = document.getElementById("profile-save-btn");
+    if (!btn) return;
     const originalText = btn.textContent;
     btn.disabled = true;
     btn.textContent = "Saving...";
@@ -1045,6 +1309,102 @@ async function updateProfile() {
         }
     } catch (err) {
         console.error("Update profile error:", err);
+        showNotification(notification, "Network error. Please try again.", "error");
+    } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
+    }
+}
+
+async function updateAccountSettings() {
+    const notification = document.getElementById("account-settings-notification");
+    const webSearchInput = document.getElementById("web-search-enabled");
+    const saveChatInput = document.getElementById("save-chat-history");
+    const remindersInput = document.getElementById("study-reminders-enabled");
+    const gradeLevelInput = document.getElementById("grade-level");
+    const educationBoardInput = document.getElementById("education-board");
+    const btn = document.getElementById("account-settings-save-btn");
+
+    if (!webSearchInput || !saveChatInput || !remindersInput || !btn) return;
+
+    const originalText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Saving...";
+
+    try {
+        const res = await authenticatedFetch("/api/account-settings", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                web_search_enabled: webSearchInput.checked,
+                save_chat_history: saveChatInput.checked,
+                study_reminders_enabled: remindersInput.checked,
+                grade_level: gradeLevelInput ? gradeLevelInput.value.trim() : "",
+                education_board: educationBoardInput ? educationBoardInput.value.trim() : ""
+            })
+        });
+
+        const data = await res.json();
+        if (res.ok) {
+            showNotification(notification, "Account settings updated.", "success");
+        } else {
+            showNotification(notification, data.error || "Failed to update settings.", "error");
+        }
+    } catch (err) {
+        console.error("Update account settings error:", err);
+        showNotification(notification, "Network error. Please try again.", "error");
+    } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
+    }
+}
+
+async function updatePassword() {
+    const notification = document.getElementById("password-notification");
+    const newPasswordInput = document.getElementById("new-password");
+    const confirmPasswordInput = document.getElementById("confirm-password");
+    const btn = document.getElementById("password-save-btn");
+
+    if (!notification || !newPasswordInput || !confirmPasswordInput || !btn) return;
+
+    const newPassword = newPasswordInput.value;
+    const confirmPassword = confirmPasswordInput.value;
+
+    if (newPassword.length < 8) {
+        showNotification(notification, "Password must be at least 8 characters.", "error");
+        return;
+    }
+
+    if (newPassword !== confirmPassword) {
+        showNotification(notification, "Passwords do not match.", "error");
+        return;
+    }
+
+    const originalText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Updating...";
+
+    try {
+        const res = await authenticatedFetch("/api/change-password", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({ new_password: newPassword })
+        });
+
+        const data = await res.json();
+        if (res.ok) {
+            newPasswordInput.value = "";
+            confirmPasswordInput.value = "";
+            showNotification(notification, "Password updated successfully.", "success");
+        } else {
+            showNotification(notification, data.error || "Failed to update password.", "error");
+        }
+    } catch (err) {
+        console.error("Update password error:", err);
         showNotification(notification, "Network error. Please try again.", "error");
     } finally {
         btn.disabled = false;
@@ -1109,9 +1469,13 @@ function toggleSidebar() {
 }
 
 function toggleChatSidebar() {
-    const sidebar = document.getElementById('chat-sidebar');
+    const sidebar = getSidebarForMode(currentChatMode);
+    const toggleBtn = document.querySelector(".toggle-sidebar-btn");
     if (sidebar) {
         sidebar.classList.toggle('collapsed');
+        if (toggleBtn) {
+            toggleBtn.style.left = sidebar.classList.contains("collapsed") ? "10px" : "300px";
+        }
     }
 }
 
@@ -1119,6 +1483,7 @@ function startNewChat() {
     currentChatId = null;
     currentTopicId = null;
     currentSubject = null;
+    currentChatMode = null;
     clearChat();
     loadChatTopics();
 }
@@ -1243,6 +1608,7 @@ async function loadChatById(chatId, topicId, eventObj = null) {
     currentChatId = chatId;
     currentTopicId = topicId || null;
     currentSubject = null;
+    setChatMode("fundamentals");
 
     document.querySelectorAll('.chat-item').forEach(item => {
         item.classList.remove('active');

@@ -1,0 +1,173 @@
+        body {
+            margin: 0;
+            height: 100vh;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+            background-color: #f4f4f4;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding-top: 20px;
+        }
+
+        .go-back-btn {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            padding: 10px 16px;
+            font-size: 14px;
+            cursor: pointer;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 6px;
+        }
+
+        .main-content {
+            width: 100%;
+            max-width: 500px;
+            padding: 20px;
+        }
+
+        .main-content h1 {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .settings-card {
+            background: white;
+            padding: 25px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+
+        .settings-card h2 {
+            margin-top: 0;
+            margin-bottom: 20px;
+            font-size: 1.2rem;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .grade-group {
+            margin-top: 16px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-size: 14px;
+            color: #555;
+        }
+
+        .form-group input {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 14px;
+            box-sizing: border-box;
+        }
+
+        .readonly-field {
+            background-color: #f9f9f9;
+            color: #666;
+            cursor: not-allowed;
+        }
+
+        .btn-save {
+            width: 100%;
+            padding: 12px;
+            font-size: 14px;
+            cursor: pointer;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            margin-top: 10px;
+        }
+
+        .btn-save:hover {
+            background-color: #0056b3;
+        }
+
+        .btn-save:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+
+        .notification {
+            padding: 12px;
+            border-radius: 6px;
+            margin-top: 15px;
+            font-size: 14px;
+            display: none;
+        }
+
+        .notification.success {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+
+        .notification.error {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+
+        .logout-btn {
+            width: 100%;
+            padding: 12px;
+            font-size: 14px;
+            cursor: pointer;
+            background-color: #dc3545;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            margin-top: 10px;
+        }
+
+        .logout-btn:hover {
+            background-color: #c82333;
+        }
+
+        .setting-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 14px;
+            margin-bottom: 14px;
+            padding-bottom: 14px;
+            border-bottom: 1px solid #f0f0f0;
+        }
+
+        .setting-row:last-of-type {
+            border-bottom: none;
+            margin-bottom: 0;
+            padding-bottom: 0;
+        }
+
+        .setting-text h3 {
+            margin: 0;
+            font-size: 14px;
+        }
+
+        .setting-text p {
+            margin: 4px 0 0 0;
+            font-size: 12px;
+            color: #666;
+        }
+
+        .toggle {
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+        }
+
+        .divider {
+            margin: 20px 0;
+            border-top: 1px solid #eee;
+        }

@@ -1,0 +1,1 @@
+The user selected QUIZ mode. Generate a quiz set from the available notes with mixed difficulty, clear numbering, and an answer key at the end.

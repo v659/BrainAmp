@@ -1,0 +1,3 @@
+Extract note requests from the user message.
+Return JSON only in shape: {"requests":[{"subject":"<one allowed subject or null>","start":"YYYY-MM-DD"|null,"end":"YYYY-MM-DD"|null}]}.
+Use inclusive end date. Use provided local date for relative terms.
