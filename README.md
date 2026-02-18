@@ -1,113 +1,182 @@
 # BrainAmp
 
-BrainAmp is a FastAPI-based study assistant that lets users upload notes, chat with an AI tutor, and optionally enrich answers with web context from user-approved domains.
+BrainAmp is a FastAPI-powered study platform that helps students turn raw notes into guided learning.
+You can upload documents, chat with an AI tutor, generate structured courses, practice with quizzes, and schedule study tasks in a planner-style calendar.
 
-You need your own API keys right now. A public site was previously set up but is currently suspended.
+## Why Use BrainAmp
 
-## What It Does
+BrainAmp is useful when you want one workflow for the full learning loop:
 
-- Auth via Supabase (`signup`, `login`, token refresh, profile updates)
-- Upload up to 5 files per request (`pdf`, `docx`, `txt`, `png`, `jpg`, `jpeg`)
-- Extract text from documents and images (OCR for images via OpenAI Vision)
-- Auto-generate a topic and classify documents into subject presets
-- Chat with context from uploaded notes, filtered by subject/date when requested
-- Optional web context from user-allowed domains only
-- Dashboard stats, chat history, document/source management
+- Turn mixed study files into usable context (PDF/DOCX/TXT/images).
+- Ask focused questions tied to your own notes.
+- Generate day-by-day course plans from your material.
+- Create and evaluate quizzes for exam-style practice.
+- Keep learning tasks organized on a calendar.
+- Optionally enrich responses with web context from only user-approved domains.
+
+## Frontend Experience
+
+BrainAmp ships with server-rendered pages (Jinja templates) and lightweight JS/CSS assets.
+
+Primary pages:
+
+- `starter.html` (`/`): entry page.
+- `index.html` (`/login`): sign in.
+- `signup.html` (`/signup`): account creation.
+- `dashboard.html` (`/dashboard`): metrics + quick navigation.
+- `upload_docs.html` (`/upload`): note/document upload.
+- `chat.html` (`/chat`): AI tutoring across fundamentals/course/quiz modes.
+- `topics.html` (`/topics`): topic and note management.
+- `calendar.html` (`/calendar`): planner and day-level schedule.
+- `courses.html` (`/courses`): generated course plans and modules.
+- `quizzes.html` (`/quizzes`): quiz generation + management.
+- `add_sources.html` (`/sources`): manage allowed web domains.
+- `settings.html` (`/settings`): account and study preferences.
+
+Frontend scripts:
+
+- `static/script.js`: auth/session flow, chat, upload, topics, settings, dashboard, sources, quizzes, course actions.
+- `static/planner.js`: calendar rendering, planner actions, day detail handling.
+
+Styling is split per page in `static/css/`.
 
 ## Tech Stack
 
 - Backend: FastAPI + Uvicorn
-- Templates/UI: Jinja2 + static JS/CSS
-- Auth + data: Supabase
-- LLM/OCR: OpenAI API (`gpt-4o-mini`)
+- Frontend: Jinja2 templates + vanilla JS/CSS
+- LLM/OCR: OpenAI API (`gpt-4o-mini` by default)
+- Auth + persistence: Supabase
 
-## Project Layout
+## Current Project Structure
 
 ```text
-main.py                      # FastAPI app + routes
-src/convert_to_raw_text.py   # File text extraction (PDF/DOCX/TXT/Image OCR)
-src/scrape_web.py            # Domain-limited web retrieval helpers
-templates/                   # HTML templates
-static/                      # Frontend scripts/assets
-prompt/                      # Prompt templates for topic extraction + tutoring
-tests/                       # Basic test scaffolding
+.
+├── main.py                    # App initialization, shared helpers, HTML + core API routes
+├── app/
+│   ├── config.py              # Env/config flags
+│   ├── constants.py           # Default constants (e.g., subject presets)
+│   ├── helpers.py             # Utility + metadata helpers
+│   ├── prompting.py           # Prompt loading utilities
+│   ├── schemas.py             # Pydantic request/response schemas
+│   └── routers/
+│       ├── auth.py            # Auth + account settings endpoints
+│       ├── chat.py            # Chat endpoints and topic/chat listing
+│       ├── courses.py         # Course generation + module management
+│       ├── planner.py         # Calendar + planner CRUD + command endpoint
+│       └── quizzes.py         # Quiz generation/evaluation/list/delete
+├── src/
+│   ├── convert_to_raw_text.py # File text extraction + OCR pipeline
+│   └── scrape_web.py          # Domain-restricted web browsing helpers
+├── prompt/
+│   ├── prompt.md
+│   └── system/                # System/user prompt templates by feature
+├── templates/                 # Jinja HTML pages
+├── static/
+│   ├── script.js
+│   ├── planner.js
+│   └── css/
+├── tests/
+├── requirements.txt
+└── README.md
 ```
 
 ## Prerequisites
 
 - Python 3.10+
-- Supabase project with required tables (see below)
 - OpenAI API key
+- Supabase project (recommended for full persistence)
 
-## Setup
+## Environment Variables
 
-1. Create and activate a virtual environment.
-2. Install dependencies:
-
-```bash
-pip install -r requirements.txt
-```
-
-3. Create a `.env` file in the project root:
+Create `.env` in project root:
 
 ```env
+OPENAI_API_KEY=your_openai_api_key
 SUPABASE_URL=your_supabase_url
 SUPABASE_ANON_KEY=your_supabase_anon_key
-OPENAI_API_KEY=your_openai_api_key
+
+# Optional runtime flags
+SUPABASE_OPTIONAL=true
+OFFLINE_AUTH_FALLBACK=false
 ```
 
-The app exits at startup if any of these are missing.
+Notes:
 
-## Run
+- `OPENAI_API_KEY` is required.
+- If `SUPABASE_OPTIONAL=true` and Supabase credentials are missing/unavailable, startup can still continue.
+- `OFFLINE_AUTH_FALLBACK=true` enables temporary guest/offline auth behavior for development/testing.
+
+## Setup and Run
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 python main.py
 ```
 
-Server starts on `http://127.0.0.1:8080`.
+Default server URL: `http://127.0.0.1:8080`
 
-Main pages:
+## Usage Flow
 
-- `/` starter
-- `/login`
-- `/signup`
-- `/dashboard`
-- `/upload`
-- `/chat`
-- `/topics`
-- `/sources`
+1. Sign up or log in.
+2. Upload notes/documents in `/upload`.
+3. Open `/chat` and ask questions against your notes.
+4. Generate a course plan in `/courses` for a structured schedule.
+5. Track or adjust tasks in `/calendar`.
+6. Generate/review quizzes in `/quizzes`.
+7. Add trusted web domains in `/sources` if you want web-enriched responses.
+8. Use `/settings` to tune account preferences (web search toggle, chat history behavior, grade/board context).
 
-Health check:
+## Route Reference
 
+### HTML Routes
+
+- `GET /`
+- `GET /login`
+- `GET /signup`
+- `GET /settings`
+- `GET /upload`
+- `GET /dashboard`
+- `GET /chat`
+- `GET /topics`
+- `GET /calendar`
+- `GET /courses`
+- `GET /quizzes`
+- `GET /sources`
+
+### System and Health
+
+- `GET /api/system/status`
 - `GET /health`
 
-## Core API Endpoints
+### Auth and Account
 
-Auth:
-
-- `POST /api/signup`
 - `POST /api/login`
+- `POST /api/signup`
 - `POST /api/refresh`
 - `GET /api/me`
 - `POST /api/update-profile`
+- `POST /api/account-settings`
+- `POST /api/change-password`
 
-Documents:
+### Documents and Topics
 
 - `POST /api/upload`
 - `GET /api/get_topics`
+- `GET /api/chat/topics`
 - `DELETE /api/documents/{document_id}`
 - `PATCH /api/documents/{document_id}/subject`
 
-Chat:
+### Chat
 
 - `POST /api/chat/send`
 - `GET /api/chat/list/{topic_id}`
 - `GET /api/chat/history/{chat_id}`
 - `GET /api/chat/list-all`
-- `GET /api/chat/topics`
 - `DELETE /api/chat/{chat_id}`
 
-Sources and presets:
+### Sources and Subject Presets
 
 - `GET /api/sources`
 - `POST /api/sources`
@@ -116,53 +185,74 @@ Sources and presets:
 - `POST /api/subject-presets`
 - `PUT /api/subject-presets/reorder`
 
-Dashboard:
+### Dashboard and Learning Assets
 
 - `GET /api/dashboard/stats`
+- `GET /api/learning-assets`
+- `POST /api/learning-assets/course`
+- `POST /api/learning-assets/quiz`
+- `DELETE /api/learning-assets/course/{asset_id}`
+- `DELETE /api/learning-assets/quiz/{asset_id}`
+
+### Courses
+
+- `POST /api/courses/generate`
+- `GET /api/courses`
+- `GET /api/courses/{course_id}`
+- `DELETE /api/courses/{course_id}`
+- `PATCH /api/course-modules/{module_id}`
+- `GET /api/course-modules`
+
+### Planner and Calendar
+
+- `GET /api/calendar`
+- `GET /api/calendar/day/{day_text}`
+- `POST /api/planner/busy`
+- `DELETE /api/planner/busy/{slot_id}`
+- `POST /api/planner/task`
+- `DELETE /api/planner/task/{task_id}`
+- `POST /api/planner/reminder`
+- `DELETE /api/planner/reminder/{reminder_id}`
+- `POST /api/planner/command`
+
+### Quizzes
+
+- `POST /api/quizzes/generate`
+- `POST /api/quizzes/evaluate-answer`
+- `GET /api/quizzes`
+- `DELETE /api/quizzes/{quiz_id}`
 
 ## Expected Supabase Tables
 
-The code expects these tables (at minimum):
+Minimum tables for full functionality:
 
 - `documents`
 - `chat_messages`
 - `allowed_sources`
 - `subject_presets`
-
-Notable fields used by the app include:
-
-- `documents`: `id`, `user_id`, `topic`, `content`, `subject`, `created_at`, `file_count`, `file_names`
-- `chat_messages`: `id`, `user_id`, `topic_id`, `chat_id`, `chat_title`, `role`, `content`, `created_at`
-- `allowed_sources`: `id`, `user_id`, `domain`
-- `subject_presets`: `id`, `user_id`, `subject`, `position`
+- `course_plans`
+- `course_modules`
+- `saved_quizzes`
 
 ## Domain-Limited Web Context
 
-Web retrieval only runs against domains that:
+When web context is enabled, BrainAmp only browses:
 
-1. Are explicitly added by the current user in `allowed_sources`
-2. Are in `src/scrape_web.py` `DOMAIN_SEARCH`
+1. Domains saved by the current user in `allowed_sources`.
+2. Domains permitted by the backend search mapping in `src/scrape_web.py`.
 
-This keeps browsing constrained to approved sources.
+This keeps web enrichment bounded and user-controlled.
 
-## Notes and Limits
+## Tests
 
-- Max file size: `15MB` per file
-- Max files per upload: `5`
-- Combined text/context is truncated before prompt submission
-- CORS is currently open (`allow_origins=["*"]`), which should be tightened for production
-
-## Troubleshooting
-
-- `RuntimeError: Missing required environment variables`:
-  Ensure `.env` has all required keys.
-- Upload accepted but no text extracted:
-  Check file type and whether the source file has machine-readable text.
-- 401 errors on API routes:
-  Ensure `Authorization: Bearer <access_token>` is sent.
+```bash
+pytest
+```
 
 ## License
 
 This project is licensed under the terms in `LICENSE`.
 
-**THANKS TO CODEX-5.3 app, I have been able to make this better after the hackathon at a rapid pace. I could fully build and test the app using this amazing tool. I have never seen anything like this before.** I have not explored its advantages to the fullest yet, but I am extremely satisfied
+## Acknowledgments
+
+Special thanks to Codex for accelerating post-hackathon development, iteration speed, and testing throughput throughout this project.
