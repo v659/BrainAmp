@@ -5,23 +5,23 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.schemas import ChatMessage
 from app.helpers import get_account_settings_from_metadata, parse_date_range_from_message
-from main import (
-    build_filtered_context,
-    config,
-    detect_subjects_from_message,
-    generate_chat_title_from_message,
-    get_current_user,
-    get_subject_presets_for_user,
-    get_terminal_datetime_context,
-    infer_date_range_from_message,
-    infer_subject_date_requests,
-    load_prompt_text,
-    logger,
-    normalize_subject,
-    openai_client,
-    supabase,
-)
+from app.runtime import get_main_attr
 from src.scrape_web import browse_allowed_sources
+
+build_filtered_context = get_main_attr("build_filtered_context")
+config = get_main_attr("config")
+detect_subjects_from_message = get_main_attr("detect_subjects_from_message")
+generate_chat_title_from_message = get_main_attr("generate_chat_title_from_message")
+get_current_user = get_main_attr("get_current_user")
+get_subject_presets_for_user = get_main_attr("get_subject_presets_for_user")
+get_terminal_datetime_context = get_main_attr("get_terminal_datetime_context")
+infer_date_range_from_message = get_main_attr("infer_date_range_from_message")
+infer_subject_date_requests = get_main_attr("infer_subject_date_requests")
+load_prompt_text = get_main_attr("load_prompt_text")
+logger = get_main_attr("logger")
+normalize_subject = get_main_attr("normalize_subject")
+openai_client = get_main_attr("openai_client")
+supabase = get_main_attr("supabase")
 
 router = APIRouter()
 
@@ -35,7 +35,7 @@ async def send_chat(
         user_metadata = current_user.user_metadata or {}
         account_settings = get_account_settings_from_metadata(user_metadata)
         chat_mode = (chat_data.chat_mode or "fundamentals").strip().lower()
-        if chat_mode not in {"fundamentals", "course", "quiz"}:
+        if chat_mode not in {"fundamentals", "general", "course", "quiz"}:
             chat_mode = "fundamentals"
         if chat_mode == "course":
             grade_level = (account_settings.get("grade_level") or "").strip()
@@ -181,6 +181,7 @@ async def send_chat(
         # Load tutor prompt
         tutor_prompt = load_prompt_text("prompt.md")
 
+        mode_instruction = None
         if chat_mode == "course":
             grade_level = account_settings.get("grade_level", "")
             education_board = account_settings.get("education_board", "")
@@ -193,8 +194,9 @@ async def send_chat(
             )
         elif chat_mode == "quiz":
             mode_instruction = load_prompt_text("system/mode_quiz_system.txt")
-        else:
-            mode_instruction = load_prompt_text("system/mode_fundamentals_system.txt")
+        elif chat_mode == "general":
+            mode_instruction = load_prompt_text("system/mode_general_system.txt")
+        # Fundamentals mode intentionally uses prompt.md instructions directly.
 
         tutor_role_prompt = load_prompt_text("system/tutor_role_system.txt")
         context_system_prompt = load_prompt_text(
@@ -210,11 +212,10 @@ async def send_chat(
         )
 
         # Prepare messages
-        messages = [
-            {"role": "system", "content": tutor_role_prompt},
-            {"role": "system", "content": mode_instruction},
-            {"role": "system", "content": context_system_prompt}
-        ]
+        messages = [{"role": "system", "content": tutor_role_prompt}]
+        if mode_instruction:
+            messages.append({"role": "system", "content": mode_instruction})
+        messages.append({"role": "system", "content": context_system_prompt})
 
         for m in history.data or []:
             messages.append({"role": m["role"], "content": m["content"]})

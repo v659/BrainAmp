@@ -6,18 +6,18 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.helpers import get_account_settings_from_metadata, parse_iso_date_or_none
 from app.schemas import GenerateCourseData, UpdateCourseModuleData
-from main import (
-    OFFLINE_AUTH_FALLBACK,
-    SUPABASE_AVAILABLE,
-    config,
-    generate_course_plan_from_notes,
-    get_current_user,
-    get_user_documents_for_course,
-    load_prompt_text,
-    logger,
-    openai_client,
-    supabase,
-)
+from app.runtime import get_main_attr
+
+OFFLINE_AUTH_FALLBACK = get_main_attr("OFFLINE_AUTH_FALLBACK")
+SUPABASE_AVAILABLE = get_main_attr("SUPABASE_AVAILABLE")
+config = get_main_attr("config")
+generate_course_plan_from_notes = get_main_attr("generate_course_plan_from_notes")
+get_current_user = get_main_attr("get_current_user")
+get_user_documents_for_course = get_main_attr("get_user_documents_for_course")
+load_prompt_text = get_main_attr("load_prompt_text")
+logger = get_main_attr("logger")
+openai_client = get_main_attr("openai_client")
+supabase = get_main_attr("supabase")
 
 router = APIRouter()
 

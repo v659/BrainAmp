@@ -1,1 +1,0 @@
-The user selected FUNDAMENTALS mode. Use Socratic questioning and step-by-step scaffolding to help the user understand core concepts deeply.

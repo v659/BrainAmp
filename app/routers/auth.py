@@ -14,13 +14,13 @@ from app.helpers import (
     get_account_settings_from_metadata,
     is_ssl_or_network_auth_error,
 )
-from main import (
-    OFFLINE_AUTH_FALLBACK,
-    SUPABASE_AVAILABLE,
-    get_current_user,
-    logger,
-    supabase,
-)
+from app.runtime import get_main_attr
+
+OFFLINE_AUTH_FALLBACK = get_main_attr("OFFLINE_AUTH_FALLBACK")
+SUPABASE_AVAILABLE = get_main_attr("SUPABASE_AVAILABLE")
+get_current_user = get_main_attr("get_current_user")
+logger = get_main_attr("logger")
+supabase = get_main_attr("supabase")
 
 router = APIRouter()
 

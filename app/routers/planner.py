@@ -7,12 +7,12 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.helpers import get_planner_state_from_metadata, is_valid_time_hhmm, parse_iso_date_or_none
 from app.schemas import PlannerBusySlotData, PlannerCommandData, PlannerReminderData, PlannerTaskData
-from main import (
-    get_current_user,
-    logger,
-    resolve_course_module_for_user,
-    supabase,
-)
+from app.runtime import get_main_attr
+
+get_current_user = get_main_attr("get_current_user")
+logger = get_main_attr("logger")
+resolve_course_module_for_user = get_main_attr("resolve_course_module_for_user")
+supabase = get_main_attr("supabase")
 
 router = APIRouter()
 

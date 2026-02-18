@@ -6,17 +6,17 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.schemas import EvaluateQuizAnswerData, GenerateQuizData
-from main import (
-    OFFLINE_AUTH_FALLBACK,
-    SUPABASE_AVAILABLE,
-    config,
-    get_current_user,
-    get_user_documents_for_course,
-    load_prompt_text,
-    logger,
-    openai_client,
-    supabase,
-)
+from app.runtime import get_main_attr
+
+OFFLINE_AUTH_FALLBACK = get_main_attr("OFFLINE_AUTH_FALLBACK")
+SUPABASE_AVAILABLE = get_main_attr("SUPABASE_AVAILABLE")
+config = get_main_attr("config")
+get_current_user = get_main_attr("get_current_user")
+get_user_documents_for_course = get_main_attr("get_user_documents_for_course")
+load_prompt_text = get_main_attr("load_prompt_text")
+logger = get_main_attr("logger")
+openai_client = get_main_attr("openai_client")
+supabase = get_main_attr("supabase")
 
 router = APIRouter()
 

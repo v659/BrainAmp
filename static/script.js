@@ -783,7 +783,9 @@ function updateChatPlaceholder() {
     const input = document.getElementById("chat-input");
     if (!input) return;
 
-    if (currentChatMode === "course") {
+    if (currentChatMode === "general") {
+        input.placeholder = "Ask for a quick explanation, study help, or general chat...";
+    } else if (currentChatMode === "course") {
         input.placeholder = "Describe what course you want from your notes (scope, pace, exam goals)...";
     } else if (currentChatMode === "quiz") {
         input.placeholder = "Ask for a quiz (topic, difficulty, question count, format)...";
@@ -817,6 +819,12 @@ function updateModeNotice() {
 
     if (currentChatMode === "quiz") {
         notice.textContent = "Quiz mode selected. Generated quizzes are automatically saved to Quizzes.";
+        notice.style.color = "#1d4ed8";
+        return;
+    }
+
+    if (currentChatMode === "general") {
+        notice.textContent = "General Study mode selected. Responses stay brief and practical by default.";
         notice.style.color = "#1d4ed8";
         return;
     }
@@ -1126,6 +1134,9 @@ async function loadChatTopics() {
         const modeSelector = document.createElement("div");
         modeSelector.style.cssText = "display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-bottom:14px;";
         modeSelector.innerHTML = `
+            <button data-chat-mode="general" style="border:1px solid #d1d5db;border-radius:10px;padding:12px;background:#fff;text-align:left;cursor:pointer;">
+                <strong>General Study</strong><br><span style="font-size:12px;color:#6b7280;">Brief explanations + open Q&A</span>
+            </button>
             <button data-chat-mode="fundamentals" style="border:1px solid #d1d5db;border-radius:10px;padding:12px;background:#fff;text-align:left;cursor:pointer;">
                 <strong>Go Deeper (Fundamentals)</strong><br><span style="font-size:12px;color:#6b7280;">Socratic + guided reasoning</span>
             </button>
@@ -1349,7 +1360,7 @@ async function sendMessage() {
     const message = input.value.trim();
 
     if (!currentChatMode) {
-        showModeBlockingNotice("Choose a chat mode first: Fundamentals, Course, or Quiz.");
+        showModeBlockingNotice("Choose a chat mode first: General Study, Fundamentals, Course, or Quiz.");
         input.focus();
         return;
     }
@@ -1382,7 +1393,9 @@ async function sendMessage() {
 
     input.value = "";
     addMessageToChat("You", message, true);
-    const loadingNode = addLoadingMessage(currentChatMode === "fundamentals" ? "Thinking..." : "Generating...");
+    const loadingNode = addLoadingMessage(
+        currentChatMode === "course" || currentChatMode === "quiz" ? "Generating..." : "Thinking..."
+    );
     if (sendBtn) sendBtn.disabled = true;
     input.disabled = true;
 
