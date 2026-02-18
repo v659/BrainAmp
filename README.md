@@ -3,6 +3,10 @@
 BrainAmp is a FastAPI-powered study platform that helps students turn raw notes into guided learning.
 You can upload documents, chat with an AI tutor, generate structured courses, practice with quizzes, and schedule study tasks in a planner-style calendar.
 
+## Access
+
+A public BrainAmp link will be released soon.
+
 ## Why Use BrainAmp
 
 BrainAmp is useful when you want one workflow for the full learning loop:
@@ -79,43 +83,6 @@ Styling is split per page in `static/css/`.
 ├── requirements.txt
 └── README.md
 ```
-
-## Prerequisites
-
-- Python 3.10+
-- OpenAI API key
-- Supabase project (recommended for full persistence)
-
-## Environment Variables
-
-Create `.env` in project root:
-
-```env
-OPENAI_API_KEY=your_openai_api_key
-SUPABASE_URL=your_supabase_url
-SUPABASE_ANON_KEY=your_supabase_anon_key
-
-# Optional runtime flags
-SUPABASE_OPTIONAL=true
-OFFLINE_AUTH_FALLBACK=false
-```
-
-Notes:
-
-- `OPENAI_API_KEY` is required.
-- If `SUPABASE_OPTIONAL=true` and Supabase credentials are missing/unavailable, startup can still continue.
-- `OFFLINE_AUTH_FALLBACK=true` enables temporary guest/offline auth behavior for development/testing.
-
-## Setup and Run
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python main.py
-```
-
-Default server URL: `http://127.0.0.1:8080`
 
 ## Usage Flow
 
@@ -242,12 +209,6 @@ When web context is enabled, BrainAmp only browses:
 2. Domains permitted by the backend search mapping in `src/scrape_web.py`.
 
 This keeps web enrichment bounded and user-controlled.
-
-## Tests
-
-```bash
-pytest
-```
 
 ## License
 
