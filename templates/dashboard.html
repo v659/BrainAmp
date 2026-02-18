@@ -12,6 +12,9 @@
         <h2>Dashboard</h2>
         <button onclick="location.href='/upload'">Upload Document</button>
         <button onclick="location.href='/chat'">New Chat</button>
+        <button onclick="location.href='/calendar'">Calendar</button>
+        <button onclick="location.href='/courses'">Courses</button>
+        <button onclick="location.href='/quizzes'">Quizzes</button>
         <button onclick="location.href='/sources'">Add Source</button>
         <button onclick="location.href='/topics'">My Topics</button>
         <button onclick="location.href='/settings'">Settings</button>
@@ -60,6 +63,12 @@
                 <p>View and manage your notes, documents, and learning topics.</p>
                 <button class="card-btn secondary" onclick="location.href='/topics'">View Topics</button>
             </div>
+
+            <div class="card">
+                <h3>Calendar Plan</h3>
+                <p>See daily course tasks and jump straight to that day’s module.</p>
+                <button class="card-btn secondary" onclick="location.href='/calendar'">Open Calendar</button>
+            </div>
         </div>
 
         <div class="activity-section">
@@ -71,7 +80,7 @@
         </div>
     </div>
 
-    <script src="/static/script.js?v=20260215-3"></script>
+    <script src="/static/script.js?v=20260216-7"></script>
     <script>
         loadUser();
         document.addEventListener('DOMContentLoaded', loadDashboardStats);

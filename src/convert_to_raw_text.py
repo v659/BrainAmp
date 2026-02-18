@@ -1,7 +1,6 @@
 import base64
 import os
 import logging
-from typing import Optional
 
 from docx import Document
 import fitz  # PyMuPDF

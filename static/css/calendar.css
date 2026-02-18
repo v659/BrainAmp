@@ -1,0 +1,37 @@
+@import url('/static/css/planner_base.css');
+.month-nav { display: grid; grid-template-columns: 40px 1fr 40px; align-items: center; gap: 8px; }
+#month-label { text-align: center; font-weight: 600; }
+.calendar-grid {
+    display: grid;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    gap: 8px;
+    margin-bottom: 16px;
+}
+.day-cell {
+    min-height: 92px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 8px;
+    cursor: pointer;
+}
+.day-cell .num { font-weight: 700; font-size: 13px; }
+.day-cell .count { font-size: 12px; color: var(--muted); margin-top: 6px; }
+.day-cell.active { border-color: var(--primary); background: #eff6ff; }
+.day-panel { background: #fff; border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
+.day-items { display: grid; gap: 8px; }
+.day-task { border: 1px solid var(--border); border-radius: 8px; padding: 10px; background: #fafafa; }
+.day-task .title { font-weight: 600; margin-bottom: 4px; }
+.day-task .meta { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.day-task .actions a { font-size: 12px; color: var(--primary); text-decoration: none; }
+.day-task .actions button { margin-left: 8px; font-size: 12px; border: 1px solid var(--border); background: #fff; border-radius: 6px; cursor: pointer; }
+.day-tools { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
+.tool-card { border: 1px solid var(--border); border-radius: 8px; background: #fff; padding: 10px; display: grid; gap: 8px; }
+.tool-card h4 { margin: 0; font-size: 13px; }
+.tool-card input { width: 100%; border: 1px solid var(--border); border-radius: 8px; padding: 8px; font: inherit; }
+.tool-row { display: grid; gap: 8px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.tool-card .btn { padding: 8px 10px; font-size: 12px; }
+@media (max-width: 1100px) {
+    .day-tools { grid-template-columns: 1fr; }
+    .tool-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Quizzes</title>
+    <link rel="stylesheet" href="/static/css/quizzes.css?v=20260216-2">
+</head>
+<body>
+<div class="planner-shell">
+    <aside class="planner-sidebar">
+        <div class="sidebar-head">
+            <h2>Quizzes</h2>
+        </div>
+
+        <div class="generator">
+            <h3>Create in New Chat</h3>
+            <p class="hint">Quiz generation is available only from New Chat in Quiz mode.</p>
+            <button class="btn" onclick="location.href='/chat'">Open New Chat</button>
+        </div>
+
+        <div class="sidebar-head small">
+            <h2>Saved Quizzes</h2>
+        </div>
+        <div id="quizzes-list" class="scroll-list"></div>
+        <button class="btn ghost" onclick="location.href='/dashboard'">Back to Dashboard</button>
+    </aside>
+
+    <main class="planner-main">
+        <header class="page-head">
+            <h1>Quizzes</h1>
+            <div class="head-actions">
+                <button class="btn ghost" onclick="location.href='/courses'">Courses</button>
+                <button class="btn" onclick="location.href='/calendar'">Calendar</button>
+            </div>
+        </header>
+
+        <section id="quiz-empty" class="empty">Select a saved quiz to view it here.</section>
+
+        <section id="quiz-view" class="quiz-view hidden">
+            <h2 id="quiz-view-title"></h2>
+            <article id="quiz-view-content" class="quiz-content"></article>
+            <button class="btn danger" id="delete-quiz-btn">Delete Quiz</button>
+        </section>
+    </main>
+</div>
+<script src="/static/script.js?v=20260216-7"></script>
+<script src="/static/planner.js?v=20260216-3"></script>
+</body>
+</html>

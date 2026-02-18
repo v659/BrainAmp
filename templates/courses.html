@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Courses</title>
+    <link rel="stylesheet" href="/static/css/courses.css">
+</head>
+<body>
+<div class="planner-shell">
+    <aside class="planner-sidebar">
+        <div class="sidebar-head">
+            <h2>Courses</h2>
+        </div>
+
+        <div class="generator">
+            <h3>Create in New Chat</h3>
+            <p class="hint">Course generation is available only from New Chat in Course mode.</p>
+            <button class="btn" onclick="location.href='/chat'">Open New Chat</button>
+        </div>
+
+        <div class="sidebar-head small">
+            <h2>Saved Courses</h2>
+        </div>
+        <div id="courses-list" class="scroll-list"></div>
+        <button class="btn ghost" onclick="location.href='/dashboard'">Back to Dashboard</button>
+    </aside>
+
+    <main class="planner-main">
+        <header class="page-head">
+            <h1>Courses</h1>
+            <div class="head-actions">
+                <button class="btn ghost" onclick="location.href='/calendar'">Calendar</button>
+                <button class="btn" onclick="location.href='/quizzes'">Quizzes</button>
+            </div>
+        </header>
+
+        <section id="course-empty" class="empty">Select a saved course to begin.</section>
+
+        <section id="course-view" class="course-view hidden">
+            <div class="course-view-head">
+                <h2 id="course-view-title"></h2>
+                <div class="head-actions">
+                    <button class="btn" id="course-go-deeper-btn" type="button">Go Deeper</button>
+                    <button class="btn danger" id="delete-course-btn" type="button">Delete Course</button>
+                </div>
+            </div>
+            <p id="course-view-overview"></p>
+            <div id="course-modules" class="modules"></div>
+        </section>
+    </main>
+</div>
+<script src="/static/script.js?v=20260216-7"></script>
+<script src="/static/planner.js?v=20260216-3"></script>
+</body>
+</html>

@@ -1,0 +1,21 @@
+@import url('/static/css/planner_base.css');
+.course-view { background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+.course-view-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.course-view-head h2 { margin: 0; }
+.course-view-head .head-actions { display: flex; gap: 8px; }
+.modules { display: grid; gap: 10px; margin-top: 12px; }
+.module-card { border: 1px solid var(--border); border-radius: 10px; padding: 12px; background: #fafafa; }
+.module-card.active { border-color: var(--primary); background: #eff6ff; }
+.module-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.module-title { font-weight: 700; }
+.module-day { font-size: 12px; color: var(--muted); }
+.module-edit { display: grid; gap: 8px; grid-template-columns: 1fr 180px auto; margin-bottom: 8px; }
+.module-edit input { border: 1px solid var(--border); border-radius: 8px; padding: 8px; font: inherit; }
+.module-actions { margin: 2px 0 10px; }
+.module-deeper-btn { padding: 8px 10px; font-size: 12px; }
+.module-section { margin-top: 8px; }
+.module-section h4 { margin: 0 0 4px 0; font-size: 13px; }
+.module-section p { margin: 0; white-space: pre-wrap; line-height: 1.5; }
+@media (max-width: 900px) {
+    .module-edit { grid-template-columns: 1fr; }
+}

@@ -115,8 +115,7 @@ def fetch_clean_text(url: str) -> Optional[str]:
 
 def browse_allowed_sources(
         query: str,
-        forced_domain: str,
-        max_pages: int = 1
+        forced_domain: str
 ) -> str:
     if not query or not query.strip():
         logger.warning("Empty query provided")

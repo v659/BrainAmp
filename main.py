@@ -7,22 +7,34 @@ import uuid
 import re
 import json
 import subprocess
-from pathlib import Path
 
 from fastapi import FastAPI, Request, Header, HTTPException, Depends, UploadFile, File, status
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from pydantic import BaseModel, EmailStr, Field, validator
 from supabase import create_client
-from dotenv import load_dotenv
 from openai import OpenAI
 import uvicorn
 
+from app.config import config, OFFLINE_AUTH_FALLBACK, SUPABASE_OPTIONAL
+from app.constants import DEFAULT_SUBJECT_PRESETS
+from app.helpers import (
+    build_offline_user,
+    get_learning_assets_from_metadata,
+    normalize_module_lookup_text,
+    normalize_subject,
+    try_parse_date,
+)
+from app.prompting import load_prompt_text
+from app.schemas import (
+    AddSourceData,
+    LearningAssetData,
+    SubjectPresetData,
+    SubjectPresetOrderData,
+    UpdateDocumentSubjectData,
+)
 from src.convert_to_raw_text import extract_text_from_file
-from src.scrape_web import browse_allowed_sources
 
 # Configure logging
 logging.basicConfig(
@@ -31,57 +43,37 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Load environment variables
-load_dotenv()
-
-
-# Configuration
-class Config:
-    SUPABASE_URL = os.getenv("SUPABASE_URL")
-    SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
-    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-    MAX_FILE_SIZE = 15 * 1024 * 1024  # 15MB
-    MAX_FILES_PER_UPLOAD = 5
-    ALLOWED_FILE_EXTENSIONS = {"pdf", "docx", "txt", "png", "jpg", "jpeg"}
-    CHAT_HISTORY_LIMIT = 12
-    DOCUMENT_CONTENT_LIMIT = 12000
-    WEB_CONTEXT_LIMIT = 3000
-    PASSWORD_MIN_LENGTH = 8
-    OPENAI_MODEL = "gpt-4o-mini"
-
-
-config = Config()
-DEFAULT_SUBJECT_PRESETS = [
-    "Biology",
-    "History",
-    "Geography",
-    "English",
-    "Math",
-    "Computer Science",
-    "Languages",
-    "Physics",
-    "Chemistry",
-    "Economics",
-]
-DEFAULT_ACCOUNT_SETTINGS = {
-    "web_search_enabled": True,
-    "save_chat_history": True,
-    "study_reminders_enabled": False,
-    "grade_level": "",
-    "education_board": "",
-}
-
 # Validate configuration
-if not all([config.SUPABASE_URL, config.SUPABASE_ANON_KEY, config.OPENAI_API_KEY]):
-    raise RuntimeError("Missing required environment variables")
+if not config.OPENAI_API_KEY:
+    raise RuntimeError("Missing required OPENAI_API_KEY")
 
-# Initialize clients
+supabase = None
+SUPABASE_AVAILABLE = False
+
+if config.SUPABASE_URL and config.SUPABASE_ANON_KEY:
+    try:
+        supabase = create_client(config.SUPABASE_URL, config.SUPABASE_ANON_KEY)
+        SUPABASE_AVAILABLE = True
+    except Exception as e:
+        SUPABASE_AVAILABLE = False
+        logger.error(f"Supabase init failed: {e}")
+        if not SUPABASE_OPTIONAL:
+            raise
+else:
+    logger.warning("Supabase credentials missing. Running without Supabase.")
+    if not SUPABASE_OPTIONAL:
+        raise RuntimeError("Missing required SUPABASE_URL/SUPABASE_ANON_KEY")
+
 try:
-    supabase = create_client(config.SUPABASE_URL, config.SUPABASE_ANON_KEY)
     openai_client = OpenAI(api_key=config.OPENAI_API_KEY)
 except Exception as e:
-    logger.error(f"Failed to initialize clients: {e}")
+    logger.error(f"OpenAI init failed: {e}")
     raise
+
+if not SUPABASE_AVAILABLE and not OFFLINE_AUTH_FALLBACK:
+    logger.warning(
+        "Supabase unavailable. Set OFFLINE_AUTH_FALLBACK=true to allow temporary guest/offline mode."
+    )
 
 # Initialize FastAPI
 app = FastAPI(title="Brain Amp API", version="1.0.0")
@@ -98,173 +90,62 @@ app.add_middleware(
 # Mount static files and templates
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
-PROMPT_DIR = Path("prompt")
-PROMPT_CACHE: Dict[str, str] = {}
 
 
-def load_prompt_text(relative_path: str, replacements: Optional[Dict[str, str]] = None) -> str:
-    key = relative_path
-    if key not in PROMPT_CACHE:
-        path = PROMPT_DIR / relative_path
-        with open(path, "r", encoding="utf-8") as f:
-            PROMPT_CACHE[key] = f.read()
-    content = PROMPT_CACHE[key]
-    if replacements:
-        for token, value in replacements.items():
-            content = content.replace(token, value)
-    return content
+def resolve_course_module_for_user(user_id: str, identifier: str, need_task_date: bool = False) -> Optional[Dict[str, Any]]:
+    fields = "id, title, task_date" if need_task_date else "id, title"
+    ident = normalize_module_lookup_text(identifier)
+    if not ident:
+        return None
 
+    all_rows = supabase.table("course_modules").select(fields).eq("user_id", user_id).limit(300).execute().data or []
+    if not all_rows:
+        return None
 
-# Pydantic Models with Validation
-class LoginData(BaseModel):
-    email: EmailStr
-    username: str = Field(..., min_length=1, max_length=50)
-    password: str = Field(..., min_length=8, max_length=128)
+    # Semantic resolution via OpenAI only.
+    try:
+        candidates = []
+        for row in all_rows[:160]:
+            candidates.append({
+                "id": str(row.get("id")),
+                "title": str(row.get("title") or "")[:180],
+                "task_date": str(row.get("task_date") or "") if need_task_date else None
+            })
 
-    @validator('username')
-    def username_alphanumeric(cls, v):
-        if not v.replace('_', '').replace('-', '').isalnum():
-            raise ValueError('Username must be alphanumeric')
-        return v
+        system_prompt = (
+            "You map a user phrase to one module title from candidates.\n"
+            "Return ONLY valid JSON: {\"id\": \"<candidate_id_or_null>\"}.\n"
+            "Rules:\n"
+            "- Pick the single best semantic match.\n"
+            "- If confidence is low, return null.\n"
+            "- Never return an id not present in candidates."
+        )
+        user_prompt = (
+            f"Phrase: {identifier}\n\n"
+            f"Candidates:\n{json.dumps(candidates, ensure_ascii=True)}"
+        )
+        resp = openai_client.chat.completions.create(
+            model=config.OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=120,
+            temperature=0
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        if raw.startswith("```"):
+            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.IGNORECASE | re.DOTALL).strip()
+        parsed = json.loads(raw)
+        chosen_id = str(parsed.get("id") or "").strip()
+        if chosen_id:
+            for row in all_rows:
+                if str(row.get("id")) == chosen_id:
+                    return row
+    except Exception as e:
+        logger.warning("OpenAI module resolution fallback failed: %s", e)
 
-
-class SignupData(BaseModel):
-    email: EmailStr
-    username: str = Field(..., min_length=1, max_length=50)
-    password: str = Field(..., min_length=8, max_length=128)
-
-    @validator('username')
-    def username_alphanumeric(cls, v):
-        if not v.replace('_', '').replace('-', '').isalnum():
-            raise ValueError('Username must be alphanumeric')
-        return v
-
-
-class ChatMessage(BaseModel):
-    topic_id: Optional[str] = Field(None, max_length=100)
-    chat_id: Optional[str] = Field(None, max_length=100)
-    subject: Optional[str] = Field(None, max_length=60)
-    chat_mode: Optional[str] = Field(None, max_length=20)
-    message: str = Field(..., min_length=1, max_length=2000)
-
-
-class UpdateProfileData(BaseModel):
-    display_name: str = Field(..., min_length=1, max_length=50)
-
-
-class AccountSettingsData(BaseModel):
-    web_search_enabled: bool = True
-    save_chat_history: bool = True
-    study_reminders_enabled: bool = False
-    grade_level: Optional[str] = Field("", max_length=30)
-    education_board: Optional[str] = Field("", max_length=50)
-
-
-class UpdatePasswordData(BaseModel):
-    new_password: str = Field(..., min_length=8, max_length=128)
-
-
-class LearningAssetData(BaseModel):
-    title: str = Field(..., min_length=2, max_length=120)
-    content: str = Field(..., min_length=10, max_length=12000)
-    chat_id: Optional[str] = Field(None, max_length=100)
-
-
-class AddSourceData(BaseModel):
-    domain: str = Field(..., min_length=3, max_length=100)
-
-    @validator('domain')
-    def validate_domain(cls, v):
-        v = v.strip().lower()
-        if not '.' in v or ' ' in v:
-            raise ValueError('Invalid domain format')
-        return v
-
-
-class SubjectPresetData(BaseModel):
-    subject: str = Field(..., min_length=2, max_length=60)
-
-
-class SubjectPresetOrderData(BaseModel):
-    preset_ids: List[str] = Field(..., min_items=1)
-
-
-class RefreshTokenData(BaseModel):
-    refresh_token: str = Field(..., min_length=10)
-
-
-class UpdateDocumentSubjectData(BaseModel):
-    subject: str = Field(..., min_length=2, max_length=60)
-
-
-def normalize_subject(subject: str) -> str:
-    return re.sub(r"\s+", " ", subject.strip()).title()
-
-
-def get_account_settings_from_metadata(user_metadata: dict) -> dict:
-    settings = user_metadata.get("account_settings") if isinstance(user_metadata, dict) else None
-    if not isinstance(settings, dict):
-        return DEFAULT_ACCOUNT_SETTINGS.copy()
-
-    return {
-        "web_search_enabled": bool(settings.get("web_search_enabled", DEFAULT_ACCOUNT_SETTINGS["web_search_enabled"])),
-        "save_chat_history": bool(settings.get("save_chat_history", DEFAULT_ACCOUNT_SETTINGS["save_chat_history"])),
-        "study_reminders_enabled": bool(
-            settings.get("study_reminders_enabled", DEFAULT_ACCOUNT_SETTINGS["study_reminders_enabled"])
-        ),
-        "grade_level": str(settings.get("grade_level", DEFAULT_ACCOUNT_SETTINGS["grade_level"]) or "").strip(),
-        "education_board": str(settings.get("education_board", DEFAULT_ACCOUNT_SETTINGS["education_board"]) or "").strip(),
-    }
-
-
-def get_learning_assets_from_metadata(user_metadata: dict) -> Dict[str, List[Dict[str, Any]]]:
-    raw = user_metadata.get("learning_assets") if isinstance(user_metadata, dict) else None
-    if not isinstance(raw, dict):
-        return {"courses": [], "quizzes": []}
-
-    courses = raw.get("courses", [])
-    quizzes = raw.get("quizzes", [])
-    return {
-        "courses": courses if isinstance(courses, list) else [],
-        "quizzes": quizzes if isinstance(quizzes, list) else [],
-    }
-
-
-def try_parse_date(date_text: str) -> Optional[datetime]:
-    cleaned = re.sub(r'(\d)(st|nd|rd|th)', r'\1', date_text.strip(), flags=re.IGNORECASE)
-    formats = [
-        "%Y-%m-%d",
-        "%m/%d/%Y",
-        "%m/%d/%y",
-        "%B %d, %Y",
-        "%b %d, %Y",
-        "%B %d %Y",
-        "%b %d %Y"
-    ]
-    for fmt in formats:
-        try:
-            return datetime.strptime(cleaned, fmt)
-        except ValueError:
-            continue
     return None
-
-
-def parse_date_range_from_message(message: str) -> Optional[tuple[datetime, datetime]]:
-    match = re.search(r'from\s+(.+?)\s+to\s+(.+?)(?:[\.\!\?]|$)', message, flags=re.IGNORECASE)
-    if not match:
-        return None
-
-    start_dt = try_parse_date(match.group(1))
-    end_dt = try_parse_date(match.group(2))
-
-    if not start_dt or not end_dt:
-        return None
-    if end_dt < start_dt:
-        start_dt, end_dt = end_dt, start_dt
-
-    start_dt = start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
-    end_exclusive = end_dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-    return start_dt, end_exclusive
 
 
 def infer_date_range_from_message(message: str, local_date_iso: str) -> Optional[tuple[datetime, datetime]]:
@@ -419,36 +300,7 @@ def classify_subject(topic: str, content: str, preset_subjects: List[str]) -> st
     return options[-1] if options else "Other"
 
 
-def detect_subject_from_message(message: str, preset_subjects: List[str]) -> Optional[str]:
-    if not message or not preset_subjects:
-        return None
 
-    message_lower = message.lower()
-    normalized = [normalize_subject(s) for s in preset_subjects]
-
-    # Direct subject phrase match.
-    for subject in normalized:
-        if subject.lower() in message_lower:
-            return subject
-
-    alias_map = {
-        "Math": ["math", "mathematics", "algebra", "calculus", "geometry", "trigonometry"],
-        "Computer Science": ["cs", "computer science", "coding", "programming", "algorithm"],
-        "Languages": ["language", "spanish", "french", "german", "hindi", "vocabulary", "grammar"],
-        "Biology": ["biology", "bio", "cell", "genetics"],
-        "History": ["history", "historical", "civilization", "empire"],
-        "Geography": ["geography", "map", "climate", "region"],
-        "English": ["english", "literature", "essay", "poem"],
-        "Physics": ["physics", "force", "motion", "energy"],
-        "Chemistry": ["chemistry", "chemical", "reaction", "atom"],
-        "Economics": ["economics", "market", "inflation", "demand", "supply"]
-    }
-
-    for subject in normalized:
-        for alias in alias_map.get(subject, []):
-            if alias in message_lower:
-                return subject
-    return None
 
 
 def detect_subjects_from_message(message: str, preset_subjects: List[str]) -> List[str]:
@@ -556,27 +408,6 @@ def infer_subject_date_requests(message: str, preset_subjects: List[str], local_
         return []
 
 
-def build_subject_context(user_id: str, subject: str) -> str:
-    try:
-        docs = supabase.table("documents").select("topic, content, created_at, subject").eq("user_id", user_id).eq(
-            "subject", subject).order("created_at", desc=False).execute()
-        rows = docs.data or []
-    except Exception:
-        # Backward compatibility when subject column is missing.
-        rows = []
-
-    if not rows:
-        return ""
-
-    chunks = []
-    for row in rows:
-        created_date = (row.get("created_at") or "")[:10] or "Unknown"
-        chunks.append(
-            f"--- Note Date: {created_date} | Subject: {subject} | Topic: {row.get('topic', 'Untitled')} ---\n{row.get('content', '')}"
-        )
-    return "\n\n".join(chunks)
-
-
 def build_filtered_context(
         user_id: str,
         subject: Optional[str] = None,
@@ -658,10 +489,175 @@ def get_terminal_datetime_context() -> tuple[str, str]:
         return now.strftime("%Y-%m-%d"), now.strftime("%A, %B %d, %Y")
 
 
+def generate_course_plan_from_notes(
+        document_topic: str,
+        document_text: str,
+        start_date_text: str,
+        duration_days: int,
+        grade_level: str,
+        education_board: str,
+        course_title: str,
+        user_request: str = "",
+) -> dict:
+    base_system_prompt = load_prompt_text(
+        "system/course_generation_system.md",
+        {
+            "{DURATION_DAYS}": str(duration_days),
+            "{GRADE_LEVEL}": grade_level,
+            "{EDUCATION_BOARD}": education_board,
+        }
+    )
+    base_user_prompt = load_prompt_text(
+        "system/course_generation_user.md",
+        {
+            "{DOCUMENT_TOPIC}": document_topic or "Untitled topic",
+            "{START_DATE}": start_date_text,
+            "{DURATION_DAYS}": str(duration_days),
+            "{DOCUMENT_TEXT}": document_text[:9000],
+            "{COURSE_TITLE}": course_title or "None",
+            "{USER_REQUEST}": (user_request or "None")[:2000],
+        }
+    )
+
+    compact_system_suffix = (
+        "\n\nCRITICAL COMPACT MODE:\n"
+        "- Keep total JSON concise.\n"
+        "- lesson max 700 characters.\n"
+        "- practice max 350 characters.\n"
+        "- quiz max 280 characters.\n"
+        "- Avoid extra prose outside JSON."
+    )
+    compact_user_suffix = (
+        "\n\nYour previous response was too long or invalid JSON. "
+        "Retry with concise but useful content and strictly valid JSON."
+    )
+
+    parsed = None
+    last_err = None
+    for attempt in range(2):
+        compact = attempt == 1
+        system_prompt = base_system_prompt + (compact_system_suffix if compact else "")
+        user_prompt = base_user_prompt + (compact_user_suffix if compact else "")
+
+        response = openai_client.chat.completions.create(
+            model=config.OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            max_tokens=2800 if not compact else 2000,
+            temperature=0.35 if not compact else 0.25
+        )
+        raw = (response.choices[0].message.content or "").strip()
+        finish_reason = response.choices[0].finish_reason if response.choices else "unknown"
+        logger.debug(
+            "Course generation debug: attempt=%s finish_reason=%s system_prompt_len=%s user_prompt_len=%s raw_len=%s",
+            attempt + 1,
+            finish_reason,
+            len(system_prompt),
+            len(user_prompt),
+            len(raw),
+        )
+        if raw:
+            logger.debug("Course generation raw preview (first 500 chars): %s", raw[:500])
+        else:
+            logger.error("Course generation raw response is empty")
+
+        try:
+            parsed = json.loads(raw)
+            break
+        except Exception as parse_err:
+            last_err = parse_err
+            logger.error(
+                "Course JSON parse failed (attempt %s): %s | raw_preview=%s",
+                attempt + 1,
+                parse_err,
+                raw[:1200] if raw else "<empty>",
+            )
+            if attempt == 0 and finish_reason == "length":
+                continue
+            if attempt == 0:
+                continue
+            raise
+
+    if parsed is None:
+        raise last_err if last_err else ValueError("Failed to parse course generation JSON")
+    tasks = parsed.get("modules")
+    if not isinstance(tasks, list):
+        raise ValueError("Course generation returned invalid modules payload")
+
+    normalized_modules = []
+    for idx, module in enumerate(tasks):
+        if not isinstance(module, dict):
+            continue
+        day_value = int(module.get("day") or 1)
+        if day_value < 1:
+            day_value = 1
+        if day_value > duration_days:
+            day_value = duration_days
+        normalized_modules.append({
+            "day": day_value,
+            "title": (module.get("title") or f"Task {idx + 1}").strip()[:120],
+            "lesson": (module.get("lesson") or "Study the key ideas from your notes and explain them in your own words.").strip()[:12000],
+            "practice": (module.get("practice") or "Solve at least 3 practice prompts based on this lesson.").strip()[:4000],
+            "quiz": (module.get("quiz") or "Create and answer 3 self-check questions.").strip()[:4000],
+        })
+
+    if not normalized_modules:
+        for i in range(duration_days):
+            normalized_modules.append({
+                "day": i + 1,
+                "title": f"Day {i + 1} fundamentals",
+                "lesson": "Study the relevant notes and capture core concepts with examples.",
+                "practice": "Practice with 3-5 questions.",
+                "quiz": "Write and answer 3 quick checks.",
+            })
+
+    return {
+        "course_title": (parsed.get("course_title") or course_title or document_topic or "Generated Course").strip()[:120],
+        "overview": (parsed.get("overview") or "Personalized course plan generated from your notes.").strip()[:5000],
+        "modules": normalized_modules
+    }
+
+
+def get_user_documents_for_course(
+        user_id: str,
+        document_ids: List[str],
+        fallback_topic: str = "General topic"
+) -> tuple[list, str, str]:
+    if (not SUPABASE_AVAILABLE or not supabase) and document_ids:
+        topic_text = (fallback_topic or "General topic").strip()[:180]
+        return [], topic_text, ""
+
+    if document_ids:
+        docs = []
+        for doc_id in document_ids:
+            res = supabase.table("documents").select("id, topic, content").eq("user_id", user_id).eq("id", doc_id).limit(
+                1).execute()
+            if res.data:
+                docs.append(res.data[0])
+        if not docs:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Selected notes not found")
+    else:
+        # No notes selected: allow pure general-knowledge generation.
+        docs = []
+        topic_text = (fallback_topic or "General topic").strip()[:180]
+        return docs, topic_text, ""
+
+    topic_text = " + ".join([(d.get("topic") or "Untitled") for d in docs])[:180]
+    merged_content = "\n\n".join([
+        f"--- {d.get('topic') or 'Untitled'} ---\n{d.get('content') or ''}" for d in docs
+    ])
+    return docs, topic_text, merged_content
+
+
 # Dependency for authentication
 async def get_current_user(authorization: str = Header(None)):
     """Verify JWT token and return current user"""
     if not authorization:
+        if OFFLINE_AUTH_FALLBACK:
+            logger.warning("Missing authorization header; using offline fallback user.")
+            return build_offline_user()
         logger.warning("Missing authorization header")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -669,6 +665,14 @@ async def get_current_user(authorization: str = Header(None)):
         )
 
     try:
+        if not SUPABASE_AVAILABLE or not supabase:
+            if OFFLINE_AUTH_FALLBACK:
+                logger.warning("Supabase unavailable; using offline fallback user.")
+                return build_offline_user()
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Supabase unavailable"
+            )
         token = authorization.replace("Bearer ", "")
         user = supabase.auth.get_user(token).user
         if not user:
@@ -679,6 +683,9 @@ async def get_current_user(authorization: str = Header(None)):
         return user
     except Exception as e:
         logger.error(f"Authentication error: {e}")
+        if OFFLINE_AUTH_FALLBACK:
+            logger.warning("Authentication failed; using offline fallback user.")
+            return build_offline_user()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token"
@@ -703,6 +710,18 @@ def validate_file(file: UploadFile) -> None:
             detail="Filename too long"
         )
 
+
+from app.routers.auth import router as auth_router  # noqa: E402
+from app.routers.chat import router as chat_router  # noqa: E402
+from app.routers.courses import router as courses_router  # noqa: E402
+from app.routers.planner import router as planner_router  # noqa: E402
+from app.routers.quizzes import router as quizzes_router  # noqa: E402
+
+app.include_router(auth_router)
+app.include_router(chat_router)
+app.include_router(courses_router)
+app.include_router(planner_router)
+app.include_router(quizzes_router)
 
 # HTML Routes
 @app.get("/", response_class=HTMLResponse)
@@ -745,146 +764,34 @@ async def serve_topics(request: Request):
     return templates.TemplateResponse("topics.html", {"request": request})
 
 
+@app.get("/calendar", response_class=HTMLResponse)
+async def serve_calendar(request: Request):
+    return templates.TemplateResponse("calendar.html", {"request": request})
+
+
+@app.get("/courses", response_class=HTMLResponse)
+async def serve_courses(request: Request):
+    return templates.TemplateResponse("courses.html", {"request": request})
+
+
+@app.get("/quizzes", response_class=HTMLResponse)
+async def serve_quizzes(request: Request):
+    return templates.TemplateResponse("quizzes.html", {"request": request})
+
+
 @app.get("/sources", response_class=HTMLResponse)
 async def serve_sources(request: Request):
     return templates.TemplateResponse("add_sources.html", {"request": request})
 
 
 # API Routes
-@app.post("/api/login")
-async def login(data: LoginData):
-    """User login endpoint"""
-    try:
-        result = supabase.auth.sign_in_with_password({
-            "email": data.email,
-            "password": data.password
-        })
+@app.get("/api/system/status")
+async def system_status():
+    return {
+        "supabase_available": bool(SUPABASE_AVAILABLE and supabase),
+        "offline_auth_fallback_enabled": bool(OFFLINE_AUTH_FALLBACK),
+    }
 
-        if result.user:
-            logger.info(f"User logged in: {result.user.id}")
-            return {
-                "status": "logged_in",
-                "user_id": result.user.id,
-                "email": result.user.email,
-                "display_name": result.user.user_metadata.get("display_name", data.username),
-                "access_token": result.session.access_token,
-                "refresh_token": result.session.refresh_token
-            }
-
-        return JSONResponse(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            content={"error": "Invalid credentials"}
-        )
-    except Exception as e:
-        logger.error(f"Login error: {e}")
-        return JSONResponse(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            content={"error": "Invalid credentials"}
-        )
-
-
-@app.post("/api/signup")
-async def signup(data: SignupData):
-    """User signup endpoint"""
-    try:
-        result = supabase.auth.sign_up({
-            "email": data.email,
-            "password": data.password,
-            "options": {
-                "data": {"display_name": data.username}
-            }
-        })
-
-        if result.user:
-            logger.info(f"New user signed up: {result.user.id}")
-            return {
-                "status": "signed_up",
-                "user_id": result.user.id,
-                "email": result.user.email,
-                "display_name": result.user.user_metadata.get("display_name", data.username),
-                "access_token": result.session.access_token,
-                "refresh_token": result.session.refresh_token
-            }
-
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={"error": "Signup failed"}
-        )
-    except Exception as e:
-        logger.error(f"Signup error: {e}")
-        error_msg = str(e)
-        if "already registered" in error_msg.lower():
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={"error": "Email already registered"}
-            )
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={"error": "Signup failed. Please try again."}
-        )
-
-
-@app.post("/api/update-profile")
-async def update_profile(
-        data: UpdateProfileData,
-        current_user=Depends(get_current_user)
-):
-    """Update user profile"""
-    try:
-        result = supabase.auth.update_user({
-            "data": {"display_name": data.display_name}
-        })
-
-        if result and result.user:
-            logger.info(f"Profile updated for user: {current_user.id}")
-            return {"success": True, "display_name": data.display_name}
-
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={"error": "Failed to update profile"}
-        )
-    except Exception as e:
-        logger.error(f"Profile update error: {e}")
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={"error": "Failed to update profile. Please try again."}
-        )
-
-
-@app.post("/api/account-settings")
-async def update_account_settings(
-        data: AccountSettingsData,
-        current_user=Depends(get_current_user)
-):
-    """Update persisted account settings in user metadata"""
-    try:
-        user_metadata = current_user.user_metadata or {}
-        merged_metadata = {
-            **user_metadata,
-            "account_settings": {
-                "web_search_enabled": data.web_search_enabled,
-                "save_chat_history": data.save_chat_history,
-                "study_reminders_enabled": data.study_reminders_enabled,
-                "grade_level": (data.grade_level or "").strip(),
-                "education_board": (data.education_board or "").strip(),
-            }
-        }
-
-        result = supabase.auth.update_user({"data": merged_metadata})
-        if result and result.user:
-            logger.info(f"Account settings updated for user: {current_user.id}")
-            return {"success": True, "account_settings": merged_metadata["account_settings"]}
-
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={"error": "Failed to update account settings"}
-        )
-    except Exception as e:
-        logger.error(f"Account settings update error: {e}")
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={"error": "Failed to update account settings. Please try again."}
-        )
 
 
 @app.get("/api/learning-assets")
@@ -1009,70 +916,6 @@ async def delete_quiz_asset(asset_id: str, current_user=Depends(get_current_user
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to delete quiz")
 
 
-@app.post("/api/change-password")
-async def change_password(
-        data: UpdatePasswordData,
-        current_user=Depends(get_current_user)
-):
-    """Change account password for authenticated user"""
-    try:
-        result = supabase.auth.update_user({"password": data.new_password})
-        if result and result.user:
-            logger.info(f"Password updated for user: {current_user.id}")
-            return {"success": True}
-
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={"error": "Failed to update password"}
-        )
-    except Exception as e:
-        logger.error(f"Password update error: {e}")
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={"error": "Failed to update password. Please try again."}
-        )
-
-
-@app.post("/api/refresh")
-async def refresh_access_token(data: RefreshTokenData):
-    """Refresh access token using Supabase refresh token."""
-    try:
-        refreshed = supabase.auth.refresh_session(data.refresh_token)
-        session = refreshed.session
-        if not session:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Failed to refresh session"
-            )
-        return {
-            "access_token": session.access_token,
-            "refresh_token": session.refresh_token
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Token refresh error: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid refresh token"
-        )
-
-
-@app.get("/api/me")
-async def get_me(current_user=Depends(get_current_user)):
-    """Get current user information"""
-    user_metadata = current_user.user_metadata or {}
-    display_name = user_metadata.get("display_name", "User")
-    if not display_name or display_name == "User":
-        display_name = current_user.email.split('@')[0]
-    account_settings = get_account_settings_from_metadata(user_metadata)
-
-    return {
-        "user_id": current_user.id,
-        "email": current_user.email,
-        "display_name": display_name,
-        "account_settings": account_settings
-    }
 
 
 @app.post("/api/upload")
@@ -1118,7 +961,7 @@ async def upload_docs(
             if total_size > config.MAX_FILE_SIZE * 2:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Total upload size exceeds maximum allowed"
+                    detail="Total upload size exceeds maximum allowed"
                 )
 
             # Process file
@@ -1177,7 +1020,7 @@ async def upload_docs(
 
         # Save to database
         try:
-            result = supabase.table("documents").insert({
+            supabase.table("documents").insert({
                 "user_id": current_user.id,
                 "content": combined_text,
                 "topic": topic,
@@ -1211,395 +1054,12 @@ async def upload_docs(
         )
 
 
-@app.post("/api/chat/send")
-async def send_chat(
-        chat_data: ChatMessage,
-        current_user=Depends(get_current_user)
-):
-    """Send chat message and get AI response"""
-    try:
-        user_metadata = current_user.user_metadata or {}
-        account_settings = get_account_settings_from_metadata(user_metadata)
-        chat_mode = (chat_data.chat_mode or "fundamentals").strip().lower()
-        if chat_mode not in {"fundamentals", "course", "quiz"}:
-            chat_mode = "fundamentals"
-        if chat_mode == "course":
-            grade_level = (account_settings.get("grade_level") or "").strip()
-            education_board = (account_settings.get("education_board") or "").strip()
-            if not grade_level or not education_board:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Please set your Grade and Board in Settings before using course mode."
-                )
-
-        # Load document context from a selected topic, selected/derived subject, or requested date range.
-        local_date_iso, local_date_long = get_terminal_datetime_context()
-        document_content = ""
-        context_notice = ""
-        selected_subject = normalize_subject(chat_data.subject) if chat_data.subject else None
-        if chat_data.topic_id:
-            doc = supabase.table("documents").select("content").eq("id", chat_data.topic_id).eq("user_id",
-                                                                                                current_user.id).execute()
-            if doc.data:
-                document_content = doc.data[0]["content"]
-            else:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Document not found"
-                )
-        else:
-            explicit_date_range = parse_date_range_from_message(chat_data.message)
-            preset_subjects = get_subject_presets_for_user(current_user.id)
-            request_specs = []
-
-            if selected_subject:
-                inferred_date_range = infer_date_range_from_message(chat_data.message, local_date_iso)
-                request_specs.append({
-                    "subject": selected_subject,
-                    "date_range": explicit_date_range or inferred_date_range
-                })
-            else:
-                inferred_requests = infer_subject_date_requests(
-                    message=chat_data.message,
-                    preset_subjects=preset_subjects,
-                    local_date_iso=local_date_iso
-                )
-                for req in inferred_requests:
-                    request_specs.append(req)
-
-                if not request_specs:
-                    inferred_date_range = infer_date_range_from_message(chat_data.message, local_date_iso)
-                    inferred_subjects = detect_subjects_from_message(chat_data.message, preset_subjects)
-                    if inferred_subjects:
-                        for subject in inferred_subjects:
-                            request_specs.append({
-                                "subject": subject,
-                                "date_range": explicit_date_range or inferred_date_range
-                            })
-                    elif explicit_date_range or inferred_date_range:
-                        request_specs.append({
-                            "subject": None,
-                            "date_range": explicit_date_range or inferred_date_range
-                        })
-
-            context_chunks = []
-            missing_requests = []
-            for spec in request_specs:
-                subject = spec.get("subject")
-                date_range = spec.get("date_range")
-                chunk = build_filtered_context(
-                    user_id=current_user.id,
-                    subject=subject,
-                    date_range=date_range
-                )
-                if chunk:
-                    label = subject or "All subjects"
-                    context_chunks.append(f"=== Requested Notes: {label} ===\n{chunk}")
-                elif date_range:
-                    start_dt, end_exclusive = date_range
-                    date_label = f"{start_dt.date()} to {(end_exclusive - timedelta(days=1)).date()}"
-                    missing_requests.append(f"{subject or 'All subjects'} ({date_label})")
-
-            if context_chunks:
-                document_content = "\n\n".join(context_chunks)
-            elif missing_requests:
-                context_notice = (
-                    "No notes were found for: " + ", ".join(missing_requests) +
-                    ". Tell the user this briefly, then offer another range or subject."
-                )
-
-        # Generate or use existing chat_id
-        chat_id = chat_data.chat_id or str(uuid.uuid4())
-        is_new_chat = not chat_data.chat_id
-
-        # Generate chat title from first message (limited to 100 chars)
-        chat_title = None
-        if is_new_chat:
-            chat_title = generate_chat_title_from_message(chat_data.message)
-
-        # Get allowed domains for web search
-        res = supabase.table("allowed_sources").select("domain").eq("user_id", current_user.id).execute()
-        allowed_domains = [r["domain"] for r in res.data]
-
-        # Determine if web search is needed
-        web_context = ""
-        if account_settings.get("web_search_enabled", True) and allowed_domains:
-            domain_selection_prompt = load_prompt_text(
-                "system/domain_selection_system.md",
-                {"{ALLOWED_DOMAINS}": ", ".join(allowed_domains)}
-            )
-
-            try:
-                selection = openai_client.chat.completions.create(
-                    model=config.OPENAI_MODEL,
-                    messages=[
-                        {"role": "system", "content": domain_selection_prompt},
-                        {"role": "user", "content": chat_data.message}
-                    ],
-                    max_tokens=100,
-                    temperature=0
-                )
-
-                import json
-                decision = json.loads(selection.choices[0].message.content)
-                chosen_domain = decision.get("domain")
-                query = decision.get("query", chat_data.message)
-
-                if chosen_domain in allowed_domains:
-                    web_context = browse_allowed_sources(query=query, forced_domain=chosen_domain)
-                    logger.info(f"Web search performed: {chosen_domain}")
-            except Exception as e:
-                logger.warning(f"Web search decision error: {e}")
-
-        # Load chat history
-        history = supabase.table("chat_messages").select("role, content").eq("user_id", current_user.id).eq("chat_id",
-                                                                                                            chat_id).order(
-            "created_at", desc=False).limit(config.CHAT_HISTORY_LIMIT).execute()
-
-        # Load tutor prompt
-        tutor_prompt = load_prompt_text("prompt.md")
-
-        if chat_mode == "course":
-            grade_level = account_settings.get("grade_level", "")
-            education_board = account_settings.get("education_board", "")
-            mode_instruction = load_prompt_text(
-                "system/mode_course_system.txt",
-                {
-                    "{GRADE_LEVEL}": grade_level,
-                    "{EDUCATION_BOARD}": education_board
-                }
-            )
-        elif chat_mode == "quiz":
-            mode_instruction = load_prompt_text("system/mode_quiz_system.txt")
-        else:
-            mode_instruction = load_prompt_text("system/mode_fundamentals_system.txt")
-
-        tutor_role_prompt = load_prompt_text("system/tutor_role_system.txt")
-        context_system_prompt = load_prompt_text(
-            "system/chat_context_system.md",
-            {
-                "{LOCAL_DATE_ISO}": local_date_iso,
-                "{LOCAL_DATE_LONG}": local_date_long,
-                "{DOCUMENT_CONTEXT}": document_content[:config.DOCUMENT_CONTENT_LIMIT] if document_content else "None",
-                "{WEB_CONTEXT}": web_context[:config.WEB_CONTEXT_LIMIT] if web_context else "None",
-                "{TUTOR_PROMPT}": tutor_prompt,
-                "{CONTEXT_NOTICE}": context_notice if context_notice else "None",
-            }
-        )
-
-        # Prepare messages
-        messages = [
-            {"role": "system", "content": tutor_role_prompt},
-            {"role": "system", "content": mode_instruction},
-            {"role": "system", "content": context_system_prompt}
-        ]
-
-        for m in history.data or []:
-            messages.append({"role": m["role"], "content": m["content"]})
-
-        messages.append({"role": "user", "content": chat_data.message})
-
-        # Get AI response
-        try:
-            response = openai_client.chat.completions.create(
-                model=config.OPENAI_MODEL,
-                messages=messages,
-                max_tokens=1500,
-                temperature=0.7
-            )
-
-            ai_text = response.choices[0].message.content.strip()
-        except Exception as e:
-            logger.error(f"OpenAI API error: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to generate response"
-            )
-
-        # Save messages to database
-        if account_settings.get("save_chat_history", True):
-            try:
-                user_msg = {
-                    "user_id": current_user.id,
-                    "topic_id": chat_data.topic_id,
-                    "chat_id": chat_id,
-                    "role": "user",
-                    "content": chat_data.message
-                }
-                assistant_msg = {
-                    "user_id": current_user.id,
-                    "topic_id": chat_data.topic_id,
-                    "chat_id": chat_id,
-                    "role": "assistant",
-                    "content": ai_text
-                }
-                # Persist title only for the first message pair in a chat.
-                if chat_title:
-                    user_msg["chat_title"] = chat_title
-                    assistant_msg["chat_title"] = chat_title
-
-                messages_to_insert = [user_msg, assistant_msg]
-
-                supabase.table("chat_messages").insert(messages_to_insert).execute()
-
-                logger.info(f"Chat message saved for user {current_user.id}")
-            except Exception as e:
-                logger.error(f"Failed to save chat messages: {e}")
-
-        return {
-            "chat_id": chat_id,
-            "ai_response": ai_text
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Chat error: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Chat failed. Please try again."
-        )
 
 
-@app.get("/api/chat/list/{topic_id}")
-async def list_chats(topic_id: str, current_user=Depends(get_current_user)):
-    """List all chats for a topic with their titles"""
-    try:
-        result = supabase.table("chat_messages").select("chat_id, chat_title, created_at").eq("user_id",
-                                                                                              current_user.id).eq(
-            "topic_id", topic_id).order("created_at", desc=True).execute()
-
-        # Get unique chats with their titles (first occurrence has the title)
-        seen_chats = {}
-        for row in result.data:
-            chat_id = row["chat_id"]
-            if chat_id not in seen_chats:
-                seen_chats[chat_id] = {
-                    "chat_id": chat_id,
-                    "chat_title": row.get("chat_title"),
-                    "created_at": row["created_at"]
-                }
-
-        chats = list(seen_chats.values())
-        return {"chats": chats}
-    except Exception as e:
-        logger.error(f"List chats error: {e}")
-        return {"chats": []}
 
 
-@app.get("/api/chat/history/{chat_id}")
-async def get_chat_history(chat_id: str, current_user=Depends(get_current_user)):
-    """Get all messages from a specific chat"""
-    try:
-        result = supabase.table("chat_messages").select("role, content, created_at").eq("user_id", current_user.id).eq(
-            "chat_id", chat_id).order("created_at", desc=False).execute()
-
-        messages = [
-            {
-                "role": msg["role"],
-                "content": msg["content"],
-                "is_user": msg["role"] == "user"
-            }
-            for msg in result.data
-        ]
-
-        return {"messages": messages}
-    except Exception as e:
-        logger.error(f"Chat history error: {e}")
-        return {"messages": []}
 
 
-@app.get("/api/chat/list-all")
-async def list_all_chats(current_user=Depends(get_current_user)):
-    """List all chats for the user, including chats not tied to a single topic"""
-    try:
-        messages = supabase.table("chat_messages").select("chat_id, chat_title, topic_id, created_at").eq("user_id",
-                                                                                                            current_user.id).order(
-            "created_at", desc=True).execute()
-
-        docs = supabase.table("documents").select("id, topic").eq("user_id", current_user.id).execute()
-        topic_map = {row["id"]: row.get("topic", "Untitled") for row in (docs.data or [])}
-
-        seen = {}
-        for row in messages.data or []:
-            chat_id = row.get("chat_id")
-            if not chat_id:
-                continue
-            topic_id = row.get("topic_id")
-            row_title = row.get("chat_title")
-
-            if chat_id not in seen:
-                seen[chat_id] = {
-                    "chat_id": chat_id,
-                    "chat_title": row_title,
-                    "topic_id": topic_id,
-                    "topic_name": topic_map.get(topic_id, "Date-range notes") if topic_id else "Date-range notes",
-                    "created_at": row.get("created_at")
-                }
-            else:
-                # If latest row had null title, backfill from older titled rows.
-                if not seen[chat_id].get("chat_title") and row_title:
-                    seen[chat_id]["chat_title"] = row_title
-
-        return {"chats": list(seen.values())}
-    except Exception as e:
-        logger.error(f"List all chats error: {e}")
-        return {"chats": []}
-
-
-@app.get("/api/chat/topics")
-async def get_chat_topics(current_user=Depends(get_current_user)):
-    """Get all topics for the user"""
-    try:
-        try:
-            result = supabase.table("documents").select("id, topic, subject, created_at").eq("user_id",
-                                                                                              current_user.id).order(
-                "created_at", desc=True).execute()
-            rows = result.data or []
-        except Exception:
-            # Backward compatibility for older schema.
-            result = supabase.table("documents").select("id, topic").eq("user_id", current_user.id).execute()
-            rows = [{"id": r.get("id"), "topic": r.get("topic"), "subject": "Uncategorized", "created_at": None}
-                    for r in (result.data or [])]
-        return {"topics": rows}
-    except Exception as e:
-        logger.error(f"Get topics error: {e}")
-        return {"topics": []}
-
-
-@app.get("/api/get_topics")
-async def get_topics(current_user=Depends(get_current_user)):
-    """Get all topics with content for the user"""
-    try:
-        try:
-            result = supabase.table("documents").select("id, topic, content, subject, created_at").eq("user_id",
-                                                                                                        current_user.id).order(
-                "created_at", desc=True).execute()
-            rows = result.data or []
-        except Exception:
-            # Backward compatibility for older schema.
-            result = supabase.table("documents").select("id, topic, content").eq("user_id", current_user.id).execute()
-            rows = [{
-                "id": r.get("id"),
-                "topic": r.get("topic"),
-                "content": r.get("content"),
-                "subject": "Uncategorized",
-                "created_at": None
-            } for r in (result.data or [])]
-
-        topics = []
-        for row in rows:
-            topics.append({
-                "id": row.get("id"),
-                "topic": row.get("topic"),
-                "content": row.get("content"),
-                "subject": row.get("subject") or "Uncategorized",
-                "created_at": row.get("created_at")
-            })
-        return {"topics": topics}
-    except Exception as e:
-        logger.error(f"Get topics with content error: {e}")
-        return {"topics": []}
 
 
 @app.delete("/api/documents/{document_id}")
@@ -1657,31 +1117,6 @@ async def update_document_subject(
             detail="Failed to update document subject"
         )
 
-
-@app.delete("/api/chat/{chat_id}")
-async def delete_chat(chat_id: str, current_user=Depends(get_current_user)):
-    """Delete all messages in a chat thread for the current user"""
-    try:
-        chat_check = supabase.table("chat_messages").select("chat_id").eq("chat_id", chat_id).eq("user_id",
-                                                                                                   current_user.id).limit(
-            1).execute()
-        if not chat_check.data:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Chat not found"
-            )
-
-        supabase.table("chat_messages").delete().eq("chat_id", chat_id).eq("user_id", current_user.id).execute()
-        logger.info(f"Chat deleted by user {current_user.id}: {chat_id}")
-        return {"success": True}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Delete chat error: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Failed to delete chat"
-        )
 
 
 @app.get("/api/dashboard/stats")

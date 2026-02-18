@@ -1,0 +1,65 @@
+:root {
+    --primary: #2563eb;
+    --primary-dark: #1e40af;
+    --bg: #f4f6fb;
+    --card: #ffffff;
+    --text: #111827;
+    --muted: #6b7280;
+    --border: #e5e7eb;
+}
+* { box-sizing: border-box; }
+body {
+    margin: 0;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+}
+.planner-shell { display: flex; min-height: 100vh; }
+.planner-sidebar {
+    width: 320px;
+    background: var(--card);
+    border-right: 1px solid var(--border);
+    padding: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+.planner-main { flex: 1; padding: 24px; }
+.sidebar-head { display: flex; justify-content: space-between; align-items: center; }
+.sidebar-head.small { margin-top: 8px; }
+.sidebar-head h2 { margin: 0; font-size: 1rem; text-transform: uppercase; color: var(--muted); }
+.page-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+.page-head h1 { margin: 0; }
+.head-actions { display: flex; gap: 8px; }
+.btn {
+    border: none;
+    background: var(--primary);
+    color: #fff;
+    border-radius: 8px;
+    padding: 10px 12px;
+    cursor: pointer;
+}
+.btn:hover { background: var(--primary-dark); }
+.btn.ghost {
+    background: #fff;
+    color: var(--primary);
+    border: 1px solid var(--border);
+}
+.btn.danger { background: #dc2626; }
+.btn.danger:hover { background: #b91c1c; }
+.generator { border: 1px solid var(--border); border-radius: 10px; padding: 12px; background: #fafafa; }
+.generator h3 { margin: 0 0 10px 0; font-size: 14px; }
+.generator label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 4px; }
+.generator input, .generator select { width: 100%; padding: 9px; border-radius: 8px; border: 1px solid var(--border); }
+.scroll-list { overflow-y: auto; border: 1px solid var(--border); border-radius: 10px; background: #fff; }
+.list-item { border-bottom: 1px solid var(--border); padding: 10px; cursor: pointer; }
+.list-item:last-child { border-bottom: none; }
+.list-item:hover { background: #eff6ff; }
+.list-item.active { background: #dbeafe; }
+.hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
+.empty { color: var(--muted); background: #fff; border: 1px dashed var(--border); border-radius: 12px; padding: 20px; }
+.hidden { display: none; }
+@media (max-width: 960px) {
+    .planner-shell { flex-direction: column; }
+    .planner-sidebar { width: 100%; border-right: none; border-bottom: 1px solid var(--border); }
+}

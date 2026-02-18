@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Learning Calendar</title>
+    <link rel="stylesheet" href="/static/css/calendar.css">
+</head>
+<body>
+<div class="planner-shell">
+    <aside class="planner-sidebar">
+        <div class="sidebar-head">
+            <h2>Calendar</h2>
+            <button class="btn" id="today-btn">Today</button>
+        </div>
+        <div class="month-nav">
+            <button class="btn ghost" id="prev-month">◀</button>
+            <div id="month-label">Month</div>
+            <button class="btn ghost" id="next-month">▶</button>
+        </div>
+        <div id="day-list" class="scroll-list"></div>
+        <button class="btn ghost" onclick="location.href='/dashboard'">Back to Dashboard</button>
+    </aside>
+
+    <main class="planner-main">
+        <header class="page-head">
+            <h1>Learning Calendar</h1>
+            <button class="btn" onclick="location.href='/courses'">Courses</button>
+        </header>
+        <section id="calendar-grid" class="calendar-grid"></section>
+        <section class="day-panel">
+            <h3 id="day-title">Select a day</h3>
+            <div id="day-items" class="day-items"></div>
+            <div class="day-tools">
+                <div class="tool-card">
+                    <h4>Add Task</h4>
+                    <input id="task-title" type="text" placeholder="Task title">
+                    <div class="tool-row">
+                        <input id="task-date" type="date">
+                        <input id="task-time" type="time">
+                    </div>
+                    <button class="btn" id="add-task-btn" type="button">Add Task</button>
+                </div>
+
+                <div class="tool-card">
+                    <h4>Mark Busy</h4>
+                    <input id="busy-title" type="text" placeholder="Busy block title (optional)">
+                    <div class="tool-row">
+                        <input id="busy-date" type="date">
+                        <input id="busy-start" type="time">
+                        <input id="busy-end" type="time">
+                    </div>
+                    <button class="btn" id="add-busy-btn" type="button">Mark Busy</button>
+                </div>
+
+                <div class="tool-card">
+                    <h4>Add Reminder</h4>
+                    <input id="reminder-text" type="text" placeholder="Reminder text">
+                    <div class="tool-row">
+                        <input id="reminder-date" type="date">
+                        <input id="reminder-time" type="time">
+                    </div>
+                    <button class="btn" id="add-reminder-btn" type="button">Add Reminder</button>
+                </div>
+            </div>
+        </section>
+    </main>
+</div>
+<script src="/static/script.js?v=20260216-7"></script>
+<script src="/static/planner.js?v=20260216-3"></script>
+</body>
+</html>

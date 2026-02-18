@@ -6,6 +6,7 @@ const CONFIG = {
     MAX_MESSAGE_LENGTH: 2000,
     REQUEST_TIMEOUT: 30000, // 30 seconds
 };
+const CHAT_DRAFT_KEY = "chat_draft_v1";
 const DEFAULT_SUBJECT_PRESETS = [
     "Biology", "History", "Geography", "English", "Math",
     "Computer Science", "Languages", "Physics", "Chemistry", "Economics", "Other"
@@ -143,6 +144,17 @@ async function authenticatedFetch(url, options = {}) {
     const retryHeaders = { ...(options.headers || {}) };
     if (newAccess) retryHeaders.Authorization = "Bearer " + newAccess;
     return fetch(url, { ...options, headers: retryHeaders });
+}
+
+async function canUseOfflineGuestMode() {
+    try {
+        const res = await fetch("/api/system/status");
+        if (!res.ok) return false;
+        const data = await res.json();
+        return !!data.offline_auth_fallback_enabled;
+    } catch (err) {
+        return false;
+    }
 }
 
 // Authentication Functions
@@ -291,8 +303,11 @@ async function sendSignup() {
 async function loadUser() {
     const token = localStorage.getItem("access_token");
     if (!token) {
-        window.location.href = "/";
-        return;
+        const offlineAllowed = await canUseOfflineGuestMode();
+        if (!offlineAllowed) {
+            window.location.href = "/";
+            return;
+        }
     }
 
     try {
@@ -742,6 +757,7 @@ let currentChatId = null;
 let currentSubject = null;
 let currentChatMode = null;
 let currentAccountSettings = {};
+let currentInjectedContext = null;
 
 function getSidebarForMode(mode) {
     if (mode === "course") return document.getElementById("course-sidebar");
@@ -793,14 +809,14 @@ function updateModeNotice() {
             notice.innerHTML = `Course mode selected. Add <strong>Grade</strong> and <strong>Board</strong> in Settings for better course generation.`;
             notice.style.color = "#b45309";
         } else {
-            notice.textContent = `Course mode selected for Grade ${grade} | Board ${board}.`;
+            notice.textContent = `Course mode selected for Grade ${grade} | Board ${board}. Generated courses auto-save to Calendar/Courses and also create a quiz.`;
             notice.style.color = "#065f46";
         }
         return;
     }
 
     if (currentChatMode === "quiz") {
-        notice.textContent = "Quiz mode selected. Responses will focus on generating question sets + answer keys.";
+        notice.textContent = "Quiz mode selected. Generated quizzes are automatically saved to Quizzes.";
         notice.style.color = "#1d4ed8";
         return;
     }
@@ -814,6 +830,10 @@ function setChatMode(mode) {
     switchActiveSidebar(mode);
     updateModeNotice();
     updateChatPlaceholder();
+    const courseOptions = document.getElementById("course-mode-options");
+    const quizOptions = document.getElementById("quiz-mode-options");
+    if (courseOptions) courseOptions.style.display = mode === "course" ? "grid" : "none";
+    if (quizOptions) quizOptions.style.display = mode === "quiz" ? "grid" : "none";
 
     document.querySelectorAll("[data-chat-mode]").forEach(btn => {
         btn.style.borderColor = btn.dataset.chatMode === mode ? "#2563eb" : "#d1d5db";
@@ -821,126 +841,256 @@ function setChatMode(mode) {
     });
 
     if (mode === "course") {
+        loadModeNoteSelectors();
         loadSavedCourses();
     } else if (mode === "quiz") {
+        loadModeNoteSelectors();
         loadSavedQuizzes();
     } else {
         loadAllChats();
     }
 }
 
-function extractAssetTitle(text, fallbackPrefix) {
-    if (!text) return `${fallbackPrefix} ${new Date().toLocaleString()}`;
-    const first = text.split("\n").find(line => line.trim().length > 0) || text;
-    const cleaned = first.replace(/[*#`>-]/g, "").trim();
-    return cleaned.slice(0, 90) || `${fallbackPrefix} ${new Date().toLocaleString()}`;
-}
-
-async function saveLearningAsset(kind, content) {
-    const endpoint = kind === "course" ? "/api/learning-assets/course" : "/api/learning-assets/quiz";
-    const title = extractAssetTitle(content, kind === "course" ? "Course" : "Quiz");
-
+function consumeChatDraftIfAny() {
     try {
-        const res = await authenticatedFetch(endpoint, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                title,
-                content,
-                chat_id: currentChatId
-            })
-        });
-        if (!res.ok) return;
-        if (kind === "course") {
-            await loadSavedCourses();
-        } else {
-            await loadSavedQuizzes();
+        const raw = localStorage.getItem(CHAT_DRAFT_KEY);
+        if (!raw) return;
+        localStorage.removeItem(CHAT_DRAFT_KEY);
+
+        const draft = JSON.parse(raw);
+        if (!draft || typeof draft !== "object") return;
+        if (draft.mode) {
+            setChatMode(draft.mode);
         }
+        currentInjectedContext = String(draft.extra_context || "").trim() || null;
+
+        const input = document.getElementById("chat-input");
+        if (!input) return;
+        input.value = String(draft.message || "").trim().slice(0, CONFIG.MAX_MESSAGE_LENGTH);
+        input.focus();
     } catch (err) {
-        console.error(`Save ${kind} error:`, err);
+        console.error("Consume chat draft error:", err);
     }
 }
 
-function renderAssetList(containerId, items, kind) {
-    const container = document.getElementById(containerId);
-    if (!container) return;
-    container.innerHTML = "";
+function fmtIsoDate(dateObj = new Date()) {
+    const y = dateObj.getFullYear();
+    const m = String(dateObj.getMonth() + 1).padStart(2, "0");
+    const d = String(dateObj.getDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+}
 
-    if (!items.length) {
-        container.innerHTML = `<div style="padding:16px;color:#6b7280;">No saved ${kind}s yet.</div>`;
-        return;
+function getSelectedValues(selectId) {
+    const el = document.getElementById(selectId);
+    if (!el) return [];
+    if (el.dataset.pickerType === "notes-checkboxes") {
+        return Array.from(el.querySelectorAll("input[type='checkbox']:checked"))
+            .map((cb) => cb.value)
+            .filter(Boolean);
     }
+    return Array.from(el.selectedOptions || []).map(o => o.value).filter(Boolean);
+}
 
-    items.forEach(item => {
-        const row = document.createElement("div");
-        row.className = "chat-item";
+function formatCourseForChat(course, modules) {
+    const lines = [
+        `# ${course.title || "Generated Course"}`,
+        "",
+        `**Start Date:** ${course.start_date || "N/A"}`,
+        `**Duration:** ${course.duration_days || modules.length || 0} day(s)`,
+        "",
+        "## Overview",
+        course.overview || "No overview provided.",
+        "",
+        "## Plan"
+    ];
 
-        const title = document.createElement("div");
-        title.className = "chat-item-title";
-        title.textContent = item.title || `${kind} item`;
-
-        const time = document.createElement("div");
-        time.className = "chat-item-time";
-        time.textContent = item.created_at ? new Date(item.created_at).toLocaleString() : "Saved item";
-
-        const actions = document.createElement("div");
-        actions.style.cssText = "display:flex;gap:8px;margin-top:8px;";
-
-        const viewBtn = document.createElement("button");
-        viewBtn.textContent = "View";
-        viewBtn.style.cssText = "padding:4px 8px;border:none;border-radius:6px;background:#2563eb;color:#fff;cursor:pointer;font-size:12px;";
-        viewBtn.onclick = () => {
-            clearChat();
-            addMessageToChat(kind === "course" ? "Saved Course" : "Saved Quiz", item.content || "", false);
-        };
-
-        const deleteBtn = document.createElement("button");
-        deleteBtn.textContent = "Delete";
-        deleteBtn.style.cssText = "padding:4px 8px;border:none;border-radius:6px;background:#dc2626;color:#fff;cursor:pointer;font-size:12px;";
-        deleteBtn.onclick = async () => {
-            const ok = confirm(`Delete saved ${kind} "${item.title || "item"}"?`);
-            if (!ok) return;
-            const endpoint = kind === "course" ? `/api/learning-assets/course/${item.id}` : `/api/learning-assets/quiz/${item.id}`;
-            try {
-                const res = await authenticatedFetch(endpoint, { method: "DELETE" });
-                if (!res.ok) throw new Error("Delete failed");
-                if (kind === "course") {
-                    await loadSavedCourses();
-                } else {
-                    await loadSavedQuizzes();
-                }
-            } catch (err) {
-                console.error(`Delete ${kind} error:`, err);
-                alert(`Failed to delete ${kind}.`);
-            }
-        };
-
-        actions.appendChild(viewBtn);
-        actions.appendChild(deleteBtn);
-        row.appendChild(title);
-        row.appendChild(time);
-        row.appendChild(actions);
-        container.appendChild(row);
+    (modules || []).forEach((m) => {
+        lines.push(
+            "",
+            `### Day ${m.day_index} - ${m.title || "Module"}`,
+            `**Date:** ${m.task_date || "N/A"}`,
+            `**Lesson**`,
+            m.lesson_content || "No lesson content.",
+            "",
+            `**Practice**`,
+            m.practice_content || "No practice content.",
+            "",
+            `**Quick Quiz**`,
+            m.quiz_content || "No quiz content."
+        );
     });
+    return lines.join("\n");
+}
+
+function addLoadingMessage(label = "Working on your request...") {
+    const chatMessages = document.getElementById("chat-messages");
+    if (!chatMessages) return null;
+
+    const card = document.createElement("div");
+    card.className = "loading-message-card";
+    card.innerHTML = `
+        <div class="loading-message-sender">AI Tutor</div>
+        <div class="loading-message-content">
+            <span>${label}</span>
+            <span class="typing-loader"><span></span><span></span><span></span></span>
+        </div>
+    `;
+    chatMessages.appendChild(card);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+    return card;
+}
+
+function removeLoadingMessage(node) {
+    if (node && node.parentNode) {
+        node.parentNode.removeChild(node);
+    }
+}
+
+async function loadModeNoteSelectors() {
+    try {
+        const res = await authenticatedFetch("/api/get_topics");
+        if (!res.ok) return;
+        const data = await res.json();
+        const topics = data.topics || [];
+        const selectors = ["course-documents", "quiz-documents"];
+        selectors.forEach((id) => {
+            const wrap = document.getElementById(id);
+            if (!wrap) return;
+            wrap.innerHTML = "";
+            wrap.dataset.pickerType = "notes-checkboxes";
+            if (!topics.length) {
+                wrap.innerHTML = `<div class="notes-picker-empty">No notes found. You can still generate using AI general knowledge.</div>`;
+                return;
+            }
+            topics.forEach((t) => {
+                const label = document.createElement("label");
+                label.className = "notes-picker-item";
+                label.innerHTML = `
+                    <input type="checkbox" value="${t.id}" />
+                    <span>${t.topic || "Untitled"} (${t.subject || "Uncategorized"})</span>
+                `;
+                wrap.appendChild(label);
+            });
+        });
+    } catch (err) {
+        console.error("Load mode notes error:", err);
+    }
+}
+
+async function showCourseInChat(courseId) {
+    const res = await authenticatedFetch(`/api/courses/${courseId}`);
+    if (!res.ok) throw new Error("Failed to load saved course");
+    const data = await res.json();
+    clearChat();
+    addMessageToChat("Saved Course", formatCourseForChat(data.course || {}, data.modules || []), false);
 }
 
 async function loadSavedCourses() {
+    const container = document.getElementById("course-list");
+    if (!container) return;
+    container.innerHTML = "";
     try {
-        const res = await authenticatedFetch("/api/learning-assets");
+        const res = await authenticatedFetch("/api/courses");
         if (!res.ok) return;
         const data = await res.json();
-        renderAssetList("course-list", data.courses || [], "course");
+        const courses = data.courses || [];
+        if (!courses.length) {
+            container.innerHTML = `<div style="padding:16px;color:#6b7280;">No saved courses yet.</div>`;
+            return;
+        }
+
+        courses.forEach((course) => {
+            const row = document.createElement("div");
+            row.className = "chat-item";
+
+            const title = document.createElement("div");
+            title.className = "chat-item-title";
+            title.textContent = course.title || "Course";
+
+            const time = document.createElement("div");
+            time.className = "chat-item-time";
+            time.textContent = course.created_at ? new Date(course.created_at).toLocaleString() : "Saved item";
+
+            const actions = document.createElement("div");
+            actions.style.cssText = "display:flex;gap:8px;margin-top:8px;";
+            const viewBtn = document.createElement("button");
+            viewBtn.textContent = "View";
+            viewBtn.style.cssText = "padding:4px 8px;border:none;border-radius:6px;background:#2563eb;color:#fff;cursor:pointer;font-size:12px;";
+            viewBtn.onclick = async () => {
+                try {
+                    await showCourseInChat(course.id);
+                } catch (err) {
+                    alert("Failed to open course.");
+                }
+            };
+            actions.appendChild(viewBtn);
+
+            row.appendChild(title);
+            row.appendChild(time);
+            row.appendChild(actions);
+            container.appendChild(row);
+        });
     } catch (err) {
         console.error("Load saved courses error:", err);
     }
 }
 
 async function loadSavedQuizzes() {
+    const container = document.getElementById("quiz-list");
+    if (!container) return;
+    container.innerHTML = "";
     try {
-        const res = await authenticatedFetch("/api/learning-assets");
+        const res = await authenticatedFetch("/api/quizzes");
         if (!res.ok) return;
         const data = await res.json();
-        renderAssetList("quiz-list", data.quizzes || [], "quiz");
+        const quizzes = data.quizzes || [];
+        if (!quizzes.length) {
+            container.innerHTML = `<div style="padding:16px;color:#6b7280;">No saved quizzes yet.</div>`;
+            return;
+        }
+
+        quizzes.forEach((quiz) => {
+            const row = document.createElement("div");
+            row.className = "chat-item";
+            const title = document.createElement("div");
+            title.className = "chat-item-title";
+            title.textContent = quiz.title || "Quiz";
+            const time = document.createElement("div");
+            time.className = "chat-item-time";
+            time.textContent = quiz.created_at ? new Date(quiz.created_at).toLocaleString() : "Saved item";
+
+            const actions = document.createElement("div");
+            actions.style.cssText = "display:flex;gap:8px;margin-top:8px;";
+
+            const viewBtn = document.createElement("button");
+            viewBtn.textContent = "View";
+            viewBtn.style.cssText = "padding:4px 8px;border:none;border-radius:6px;background:#2563eb;color:#fff;cursor:pointer;font-size:12px;";
+            viewBtn.onclick = () => {
+                clearChat();
+                addMessageToChat("Saved Quiz", quiz.content || "", false);
+            };
+
+            const deleteBtn = document.createElement("button");
+            deleteBtn.textContent = "Delete";
+            deleteBtn.style.cssText = "padding:4px 8px;border:none;border-radius:6px;background:#dc2626;color:#fff;cursor:pointer;font-size:12px;";
+            deleteBtn.onclick = async () => {
+                const ok = confirm(`Delete saved quiz "${quiz.title || "item"}"?`);
+                if (!ok) return;
+                const delRes = await authenticatedFetch(`/api/quizzes/${quiz.id}`, { method: "DELETE" });
+                if (!delRes.ok) {
+                    alert("Failed to delete quiz.");
+                    return;
+                }
+                await loadSavedQuizzes();
+            };
+
+            actions.appendChild(viewBtn);
+            actions.appendChild(deleteBtn);
+            row.appendChild(title);
+            row.appendChild(time);
+            row.appendChild(actions);
+            container.appendChild(row);
+        });
     } catch (err) {
         console.error("Load saved quizzes error:", err);
     }
@@ -949,8 +1099,11 @@ async function loadSavedQuizzes() {
 async function loadChatTopics() {
     const token = localStorage.getItem("access_token");
     if (!token) {
-        window.location.href = "/dashboard";
-        return;
+        const offlineAllowed = await canUseOfflineGuestMode();
+        if (!offlineAllowed) {
+            window.location.href = "/dashboard";
+            return;
+        }
     }
 
     try {
@@ -992,6 +1145,42 @@ async function loadChatTopics() {
         modeNotice.id = "mode-notice";
         modeNotice.style.cssText = "margin-bottom:14px;padding:10px 12px;border:1px dashed #d1d5db;border-radius:8px;background:#fff;";
         container.appendChild(modeNotice);
+
+        const modeOptionsWrap = document.createElement("div");
+        modeOptionsWrap.style.cssText = "display:grid;gap:12px;margin-bottom:14px;";
+        modeOptionsWrap.innerHTML = `
+            <div id="course-mode-options" class="mode-options-panel" style="display:none;">
+                <label>Course title (optional)</label>
+                <input id="course-title-input" type="text" maxlength="120" placeholder="e.g. Algebra Revision Sprint" />
+                <label>Select notes (optional, multi-select)</label>
+                <div id="course-documents" class="notes-picker"></div>
+                <small class="mode-hint">If none selected, AI uses general knowledge from your request.</small>
+                <div class="mode-options-row">
+                    <div>
+                        <label>Start date</label>
+                        <input id="course-start-date" type="date" />
+                    </div>
+                    <div>
+                        <label>Duration days</label>
+                        <input id="course-duration-days" type="number" min="7" max="90" value="14" />
+                    </div>
+                </div>
+            </div>
+            <div id="quiz-mode-options" class="mode-options-panel" style="display:none;">
+                <label>Quiz title/topic (optional)</label>
+                <input id="quiz-topic-input" type="text" maxlength="120" placeholder="e.g. Thermodynamics Mixed Practice" />
+                <label>Select notes (optional, multi-select)</label>
+                <div id="quiz-documents" class="notes-picker"></div>
+                <small class="mode-hint">If none selected, AI uses general knowledge from your request.</small>
+                <div class="mode-options-row">
+                    <div>
+                        <label>Question count</label>
+                        <input id="quiz-question-count" type="number" min="3" max="25" value="8" />
+                    </div>
+                </div>
+            </div>
+        `;
+        container.appendChild(modeOptionsWrap);
 
         const topicSelect = document.createElement("select");
         topicSelect.id = "topic-select";
@@ -1054,6 +1243,7 @@ async function loadChatTopics() {
         `;
 
         const sendButton = document.createElement("button");
+        sendButton.id = "chat-send-button";
         sendButton.textContent = "Send";
         sendButton.onclick = sendMessage;
         sendButton.style.cssText = `
@@ -1076,7 +1266,11 @@ async function loadChatTopics() {
         switchActiveSidebar("fundamentals");
         updateModeNotice();
         updateChatPlaceholder();
+        const startDateInput = document.getElementById("course-start-date");
+        if (startDateInput) startDateInput.value = fmtIsoDate(new Date());
+        await loadModeNoteSelectors();
         await loadAllChats();
+        consumeChatDraftIfAny();
     } catch (err) {
         console.error("Load chat topics error:", err);
     }
@@ -1128,30 +1322,55 @@ function addMessageToChat(sender, message, isUser) {
     chatMessages.scrollTop = chatMessages.scrollHeight;
 }
 
+function showModeBlockingNotice(message) {
+    const notice = document.getElementById("mode-notice");
+    if (!notice) return;
+    notice.textContent = message;
+    notice.style.color = "#b91c1c";
+}
+
+function looksLikePlannerCommand(message) {
+    const t = (message || "").trim().toLowerCase();
+    return (
+        /^move\s+.+\s+to\s+\d{4}-\d{2}-\d{2}/.test(t) ||
+        /^add\s+task\s+.+\s+on\s+\d{4}-\d{2}-\d{2}/.test(t) ||
+        /^mark\s+.+\s+busy\s+on\s+\d{4}-\d{2}-\d{2}\s+from\s+\d{1,2}:\d{2}\s+to\s+\d{1,2}:\d{2}/.test(t) ||
+        /^remind\s+me\s+to\s+.+\s+on\s+\d{4}-\d{2}-\d{2}\s+at\s+\d{1,2}:\d{2}/.test(t) ||
+        /^when\s+is\s+.+\s+scheduled(?:\s+for)?\??$/.test(t) ||
+        /^what\s+day\s+is\s+.+\s+scheduled(?:\s+for)?\??$/.test(t) ||
+        /^is\s+.+\s+scheduled(?:\s+for)?\??$/.test(t)
+    );
+}
+
 async function sendMessage() {
     const input = document.getElementById("chat-input");
+    const sendBtn = document.getElementById("chat-send-button");
+    if (!input) return;
     const message = input.value.trim();
 
     if (!currentChatMode) {
-        alert("Choose a chat mode first: Fundamentals, Generate Course, or Quiz.");
+        showModeBlockingNotice("Choose a chat mode first: Fundamentals, Course, or Quiz.");
+        input.focus();
         return;
     }
     if (currentChatMode === "course") {
         const grade = (currentAccountSettings.grade_level || "").trim();
         const board = (currentAccountSettings.education_board || "").trim();
         if (!grade || !board) {
-            alert("Set Grade and Board in Settings before using Course mode.");
+            showModeBlockingNotice("Set Grade and Board in Settings before using Course mode.");
             return;
         }
     }
 
     if (!message) {
-        alert("Please enter a message");
+        showModeBlockingNotice("Type a message to continue.");
+        input.focus();
         return;
     }
 
     if (message.length > CONFIG.MAX_MESSAGE_LENGTH) {
-        alert(`Message too long (max ${CONFIG.MAX_MESSAGE_LENGTH} characters)`);
+        showModeBlockingNotice(`Message too long (max ${CONFIG.MAX_MESSAGE_LENGTH} characters).`);
+        input.focus();
         return;
     }
 
@@ -1163,46 +1382,127 @@ async function sendMessage() {
 
     input.value = "";
     addMessageToChat("You", message, true);
+    const loadingNode = addLoadingMessage(currentChatMode === "fundamentals" ? "Thinking..." : "Generating...");
+    if (sendBtn) sendBtn.disabled = true;
+    input.disabled = true;
 
     try {
-        const response = await authenticatedFetch("/api/chat/send", {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-                topic_id: currentTopicId,
-                subject: currentSubject,
-                chat_id: currentChatId,
-                chat_mode: currentChatMode,
-                message: message
-            })
-        });
-
-        if (!response.ok) {
-            const errorData = await response.json();
-            throw new Error(errorData.detail || "Failed to send message");
+        if (looksLikePlannerCommand(message)) {
+            const cmdRes = await authenticatedFetch("/api/planner/command", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ command: message })
+            });
+            const cmdData = await cmdRes.json();
+            if (!cmdRes.ok) {
+                throw new Error(cmdData.detail || "Planner command failed");
+            }
+            addMessageToChat("Planner", cmdData.message || "Planner updated.", false);
+            return;
         }
-
-        const data = await response.json();
-
-        if (!currentChatId) {
-            currentChatId = data.chat_id;
-        }
-
-        addMessageToChat("AI Tutor", data.ai_response, false);
 
         if (currentChatMode === "course") {
-            await saveLearningAsset("course", data.ai_response || "");
+            const docIds = getSelectedValues("course-documents");
+            const titleInput = document.getElementById("course-title-input");
+            const startDateInput = document.getElementById("course-start-date");
+            const durationInput = document.getElementById("course-duration-days");
+            const startDate = startDateInput ? startDateInput.value : "";
+            const durationDays = Number(durationInput ? durationInput.value : 14);
+            const title = titleInput ? titleInput.value.trim() : "";
+
+            if (!startDate) {
+                throw new Error("Pick a valid start date.");
+            }
+
+            const courseRes = await authenticatedFetch("/api/courses/generate", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    document_ids: docIds,
+                    title: title || null,
+                    request: message,
+                    start_date: startDate,
+                    duration_days: durationDays
+                })
+            });
+            const courseData = await courseRes.json();
+            if (!courseRes.ok) {
+                throw new Error(courseData.detail || "Failed to generate course");
+            }
+
+            let detail = null;
+            if (courseData.offline && courseData.course && courseData.modules) {
+                detail = { course: courseData.course, modules: courseData.modules };
+            } else {
+                const detailRes = await authenticatedFetch(`/api/courses/${courseData.course_id}`);
+                if (!detailRes.ok) throw new Error("Course created but failed to load details");
+                detail = await detailRes.json();
+            }
+            const courseText = formatCourseForChat(detail.course || {}, detail.modules || []);
+            const suffix = courseData.auto_quiz_id ? "\n\nAuto-saved quiz created and added to Quizzes." : "";
+            addMessageToChat("AI Tutor", courseText + suffix, false);
+            await loadSavedCourses();
+            await loadSavedQuizzes();
         } else if (currentChatMode === "quiz") {
-            await saveLearningAsset("quiz", data.ai_response || "");
+            const docIds = getSelectedValues("quiz-documents");
+            const topicInput = document.getElementById("quiz-topic-input");
+            const countInput = document.getElementById("quiz-question-count");
+            const topic = topicInput ? topicInput.value.trim() : "";
+            const questionCount = Number(countInput ? countInput.value : 8);
+
+            const quizRes = await authenticatedFetch("/api/quizzes/generate", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    document_ids: docIds,
+                    topic: topic || null,
+                    request: message,
+                    question_count: questionCount
+                })
+            });
+            const quizData = await quizRes.json();
+            if (!quizRes.ok) {
+                throw new Error(quizData.detail || "Failed to generate quiz");
+            }
+            addMessageToChat("AI Tutor", quizData.quiz?.content || "Quiz generated.", false);
+            await loadSavedQuizzes();
         } else {
+            const response = await authenticatedFetch("/api/chat/send", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    topic_id: currentTopicId,
+                    subject: currentSubject,
+                    chat_id: currentChatId,
+                    chat_mode: currentChatMode,
+                    extra_context: currentInjectedContext,
+                    message: message
+                })
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.detail || "Failed to send message");
+            }
+
+            const data = await response.json();
+            if (!currentChatId) {
+                currentChatId = data.chat_id;
+            }
+            addMessageToChat("AI Tutor", data.ai_response, false);
+            currentInjectedContext = null;
             await loadAllChats();
         }
-
     } catch (err) {
         console.error("Send message error:", err);
         addMessageToChat("System", `Error: ${err.message || "Failed to get AI response. Please try again."}`, false);
+    } finally {
+        removeLoadingMessage(loadingNode);
+        if (sendBtn) sendBtn.disabled = false;
+        input.disabled = false;
+        input.focus();
     }
 }
 
@@ -1484,6 +1784,7 @@ function startNewChat() {
     currentTopicId = null;
     currentSubject = null;
     currentChatMode = null;
+    currentInjectedContext = null;
     clearChat();
     loadChatTopics();
 }
@@ -1492,8 +1793,11 @@ function startNewChat() {
 async function loadAllChats() {
     const token = localStorage.getItem("access_token");
     if (!token) {
-        window.location.href = "/";
-        return;
+        const offlineAllowed = await canUseOfflineGuestMode();
+        if (!offlineAllowed) {
+            window.location.href = "/";
+            return;
+        }
     }
 
     try {
@@ -1608,6 +1912,7 @@ async function loadChatById(chatId, topicId, eventObj = null) {
     currentChatId = chatId;
     currentTopicId = topicId || null;
     currentSubject = null;
+    currentInjectedContext = null;
     setChatMode("fundamentals");
 
     document.querySelectorAll('.chat-item').forEach(item => {
