@@ -42,7 +42,6 @@
             background: var(--primary-dark);
         }
 
-        /* ---------- CARD ---------- */
 
         .upload-card {
             background: var(--card);
@@ -66,7 +65,6 @@
             line-height: 1.6;
         }
 
-        /* ---------- FILE INPUT ---------- */
 
         .file-input {
             width: 100%;
@@ -86,7 +84,6 @@
             background: var(--soft);
         }
 
-        /* ---------- FILE LIST ---------- */
 
         .file-list {
             text-align: left;
@@ -121,7 +118,6 @@
             cursor: pointer;
         }
 
-        /* ---------- META ---------- */
 
         .file-count {
             font-size: 13px;
@@ -130,7 +126,6 @@
             text-align: center;
         }
 
-        /* ---------- ACTIONS ---------- */
 
         .button-row {
             display: flex;
