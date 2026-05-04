@@ -520,16 +520,19 @@ def generate_course_plan_from_notes(
     )
 
     compact_system_suffix = (
-        "\n\nCRITICAL COMPACT MODE:\n"
-        "- Keep total JSON concise.\n"
-        "- lesson max 700 characters.\n"
-        "- practice max 350 characters.\n"
-        "- quiz max 280 characters.\n"
-        "- Avoid extra prose outside JSON."
+        "\n\nCRITICAL COMPACT MODE — previous response was truncated:\n"
+        f"- Course has {duration_days} modules. Each module MUST be short.\n"
+        "- lesson: max 300 characters (2-3 sentences).\n"
+        "- practice: max 150 characters (1 sentence).\n"
+        "- quiz: max 120 characters (1 question only).\n"
+        "- title: max 40 characters.\n"
+        "- overview: max 200 characters.\n"
+        "- Output ONLY the raw JSON object. No markdown, no code fences."
     )
     compact_user_suffix = (
-        "\n\nYour previous response was too long or invalid JSON. "
-        "Retry with concise but useful content and strictly valid JSON."
+        "\n\nYour previous response was too long and got cut off. "
+        f"Retry with VERY short content per module ({duration_days} modules total). "
+        "Every field must be drastically shorter. Output raw JSON only."
     )
 
     parsed = None
@@ -545,8 +548,8 @@ def generate_course_plan_from_notes(
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            max_tokens=2800 if not compact else 2000,
-            temperature=0.35 if not compact else 0.25
+            max_tokens=4096 if not compact else 4096,
+            temperature=0.35 if not compact else 0.2
         )
         raw = (response.choices[0].message.content or "").strip()
         finish_reason = response.choices[0].finish_reason if response.choices else "unknown"
@@ -574,8 +577,6 @@ def generate_course_plan_from_notes(
                 parse_err,
                 raw[:1200] if raw else "<empty>",
             )
-            if attempt == 0 and finish_reason == "length":
-                continue
             if attempt == 0:
                 continue
             raise
@@ -1121,28 +1122,81 @@ async def update_document_subject(
 
 @app.get("/api/dashboard/stats")
 async def get_dashboard_stats(current_user=Depends(get_current_user)):
-    """Get dashboard statistics"""
+    """Get dashboard statistics and recent activity feed."""
+    empty = {"doc_count": 0, "topic_count": 0, "chat_count": 0, "week_count": 0, "activity": [], "is_new_user": True}
     try:
-        # Get unique chat count
-        chat_result = supabase.table("chat_messages").select("chat_id").eq("user_id", current_user.id).execute()
-        unique_chats = len(set(row["chat_id"] for row in chat_result.data))
-
-        # Get messages from last week
         week_ago = (datetime.now() - timedelta(days=7)).isoformat()
-        week_result = supabase.table("chat_messages").select("id").eq("user_id", current_user.id).gte("created_at",
-                                                                                                      week_ago).execute()
-        week_count = len(week_result.data)
+
+        docs_res = supabase.table("documents").select(
+            "id, topic, subject, created_at"
+        ).eq("user_id", current_user.id).order("created_at", desc=True).limit(200).execute()
+
+        chat_res = supabase.table("chat_messages").select(
+            "chat_id, created_at"
+        ).eq("user_id", current_user.id).order("created_at", desc=True).limit(500).execute()
+
+        docs = docs_res.data or []
+        chat_rows = chat_res.data or []
+
+        doc_count = len(docs)
+        unique_chat_ids = set(r["chat_id"] for r in chat_rows if r.get("chat_id"))
+        chat_count = len(unique_chat_ids)
+        week_count = sum(1 for r in chat_rows if (r.get("created_at") or "") >= week_ago)
+
+        # Quiz attempts (table may not exist yet — degrade gracefully)
+        quiz_rows = []
+        try:
+            qr = supabase.table("quiz_attempts").select(
+                "quiz_title, correctness, attempted_at"
+            ).eq("user_id", current_user.id).order("attempted_at", desc=True).limit(20).execute()
+            quiz_rows = qr.data or []
+        except Exception:
+            pass
+
+        # Build activity feed (up to 8 items, sorted by time desc)
+        activity = []
+        for doc in docs[:4]:
+            activity.append({
+                "type": "document",
+                "title": f"Uploaded: {doc.get('topic') or 'Document'}",
+                "subtitle": doc.get("subject") or "",
+                "time": doc.get("created_at", ""),
+            })
+        seen_chats = set()
+        for msg in chat_rows:
+            cid = msg.get("chat_id")
+            if cid and cid not in seen_chats:
+                seen_chats.add(cid)
+                activity.append({
+                    "type": "chat",
+                    "title": "Chat session",
+                    "subtitle": "",
+                    "time": msg.get("created_at", ""),
+                })
+                if len(seen_chats) >= 3:
+                    break
+        for qa in quiz_rows[:3]:
+            label = (qa.get("correctness") or "").replace("_", " ").title()
+            activity.append({
+                "type": "quiz",
+                "title": f"Quiz: {qa.get('quiz_title') or 'Quiz attempt'}",
+                "subtitle": f"Result: {label}",
+                "time": qa.get("attempted_at", ""),
+            })
+
+        activity.sort(key=lambda x: x["time"], reverse=True)
 
         return {
-            "chat_count": unique_chats,
-            "week_count": week_count
+            "doc_count": doc_count,
+            "topic_count": doc_count,
+            "chat_count": chat_count,
+            "week_count": week_count,
+            "activity": activity[:8],
+            "is_new_user": doc_count == 0,
         }
     except Exception as e:
         logger.error(f"Stats error: {e}")
-        return {
-            "chat_count": 0,
-            "week_count": 0
-        }
+        return empty
 
 
 @app.get("/api/sources")
@@ -1267,4 +1321,4 @@ async def health_check():
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8080)
+    uvicorn.run(app, host="127.0.0.1", port=6767)

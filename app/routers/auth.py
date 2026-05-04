@@ -58,9 +58,14 @@ async def login(data: LoginData):
         )
     except Exception as e:
         logger.error(f"Login error: {e}")
-        if OFFLINE_AUTH_FALLBACK and is_ssl_or_network_auth_error(e):
-            logger.warning("Login Supabase SSL/network issue; offline fallback login granted.")
-            return build_offline_auth_response(data.username, data.email, mode="logged_in")
+        if is_ssl_or_network_auth_error(e):
+            if OFFLINE_AUTH_FALLBACK:
+                logger.warning("Login Supabase network issue; offline fallback login granted.")
+                return build_offline_auth_response(data.username, data.email, mode="logged_in")
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"error": "Cannot reach the server. Please check your connection or try again later."}
+            )
         return JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,
             content={"error": "Invalid credentials"}
@@ -104,9 +109,14 @@ async def signup(data: SignupData):
         )
     except Exception as e:
         logger.error(f"Signup error: {e}")
-        if OFFLINE_AUTH_FALLBACK and is_ssl_or_network_auth_error(e):
-            logger.warning("Signup Supabase SSL/network issue; offline fallback signup granted.")
-            return build_offline_auth_response(data.username, data.email, mode="signed_up")
+        if is_ssl_or_network_auth_error(e):
+            if OFFLINE_AUTH_FALLBACK:
+                logger.warning("Signup Supabase network issue; offline fallback signup granted.")
+                return build_offline_auth_response(data.username, data.email, mode="signed_up")
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"error": "Cannot reach the server. Please check your connection or try again later."}
+            )
         error_msg = str(e)
         if "already registered" in error_msg.lower():
             return JSONResponse(

@@ -27,22 +27,29 @@
         <h1 id="welcome-text">Welcome</h1>
 
         <div class="stats-section">
-            <div class="stat-card">
+            <div class="stat-card skeleton-card">
                 <div class="stat-label">Documents</div>
-                <div class="stat-number" id="doc-count">—</div>
+                <div class="stat-number skeleton-num" id="doc-count">—</div>
             </div>
-            <div class="stat-card">
+            <div class="stat-card skeleton-card">
                 <div class="stat-label">Topics</div>
-                <div class="stat-number" id="topic-count">—</div>
+                <div class="stat-number skeleton-num" id="topic-count">—</div>
             </div>
-            <div class="stat-card">
+            <div class="stat-card skeleton-card">
                 <div class="stat-label">Chats</div>
-                <div class="stat-number" id="chat-count">—</div>
+                <div class="stat-number skeleton-num" id="chat-count">—</div>
             </div>
-            <div class="stat-card">
+            <div class="stat-card skeleton-card">
                 <div class="stat-label">Messages This Week</div>
-                <div class="stat-number" id="week-count">—</div>
+                <div class="stat-number skeleton-num" id="week-count">—</div>
             </div>
+        </div>
+
+        <div class="onboarding-banner hidden" id="onboarding-banner">
+            <div class="onboarding-icon">📚</div>
+            <h2>Welcome to BrainAmp!</h2>
+            <p>Upload your first document to start studying smarter with AI.</p>
+            <button class="card-btn" onclick="location.href='/upload'">Upload Document</button>
         </div>
 
         <div class="dashboard-grid">
@@ -73,9 +80,10 @@
 
         <div class="activity-section">
             <h2>Recent Activity</h2>
-            <div class="activity-item">
-                <div class="activity-title">Welcome to Brain amp</div>
-                <div class="activity-time">Upload your first document to begin</div>
+            <div id="activity-list">
+                <div class="activity-item skeleton-row"></div>
+                <div class="activity-item skeleton-row"></div>
+                <div class="activity-item skeleton-row"></div>
             </div>
         </div>
     </div>

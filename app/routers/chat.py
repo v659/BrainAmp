@@ -35,7 +35,7 @@ async def send_chat(
         user_metadata = current_user.user_metadata or {}
         account_settings = get_account_settings_from_metadata(user_metadata)
         chat_mode = (chat_data.chat_mode or "fundamentals").strip().lower()
-        if chat_mode not in {"fundamentals", "general", "course", "quiz"}:
+        if chat_mode not in {"fundamentals", "general", "course", "quiz", "deeper"}:
             chat_mode = "fundamentals"
         if chat_mode == "course":
             grade_level = (account_settings.get("grade_level") or "").strip()
@@ -196,6 +196,8 @@ async def send_chat(
             mode_instruction = load_prompt_text("system/mode_quiz_system.txt")
         elif chat_mode == "general":
             mode_instruction = load_prompt_text("system/mode_general_system.txt")
+        elif chat_mode == "deeper":
+            mode_instruction = load_prompt_text("system/mode_deeper_system.txt")
         # Fundamentals mode intentionally uses prompt.md instructions directly.
 
         tutor_role_prompt = load_prompt_text("system/tutor_role_system.txt")

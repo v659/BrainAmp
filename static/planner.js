@@ -337,7 +337,8 @@ let selectedQuiz = null;
 let quizSession = {
     questions: [],
     index: 0,
-    evaluated: false
+    evaluated: false,
+    results: []
 };
 
 function extractQuizQuestions(content) {
@@ -350,10 +351,30 @@ function extractQuizQuestions(content) {
     let inAnswerKey = false;
     const questionStart = /^(?:q(?:uestion)?\s*\d+[\)\.: -]+|\d+[\)\.: -]+)\s*/i;
 
+    // Strip markdown formatting (headings, bold, italic, HR) before testing section headers
+    function stripMarkdown(line) {
+        return line
+            .replace(/^#{1,6}\s*/, "")      // ## headings
+            .replace(/\*{1,2}([^*]+)\*{1,2}/g, "$1")  // **bold** / *italic*
+            .replace(/^[-*_]{3,}$/, "---")  // horizontal rules → normalised
+            .trim();
+    }
+
+    const answerKeyPattern = /^(answer\s*key|answers|answer\s*sheet|solutions?|key)\s*[:.]?\s*$/i;
+
     for (const line of lines) {
-        if (/^(answer\s*key|answers)\b/i.test(line)) {
+        const stripped = stripMarkdown(line);
+
+        // Detect answer key / solutions section (handles markdown-formatted headings)
+        if (answerKeyPattern.test(stripped) || stripped === "---") {
+            // Only treat "---" as section end if we already have some questions
+            if (stripped === "---" && questions.length === 0 && !current) continue;
+            if (stripped === "---" && questions.length === 0) { inAnswerKey = false; continue; }
             inAnswerKey = true;
+            if (current) { questions.push(current.trim()); current = ""; }
+            continue;
         }
+
         if (inAnswerKey) continue;
 
         if (questionStart.test(line)) {
@@ -369,6 +390,7 @@ function extractQuizQuestions(content) {
             continue;
         }
 
+        // New numbered item while already building a question
         if (questionStart.test(line)) {
             questions.push(current.trim());
             current = line.replace(questionStart, "").trim();
@@ -376,11 +398,13 @@ function extractQuizQuestions(content) {
             current += ` ${line}`;
         }
     }
-    if (current) questions.push(current.trim());
+    if (current && !inAnswerKey) questions.push(current.trim());
 
     if (questions.length) return questions.slice(0, 40);
 
-    const sentenceQuestions = (content || "").match(/[^?]+\?/g) || [];
+    // Fallback: grab sentences ending with "?" but stop at any answer key heading
+    const beforeAnswerKey = content.split(/\n#{1,6}\s*(?:answer\s*key|answers|solutions?)\b/i)[0];
+    const sentenceQuestions = (beforeAnswerKey || content).match(/[^.!?\n]+\?/g) || [];
     if (sentenceQuestions.length) {
         return sentenceQuestions.map(q => q.trim()).filter(Boolean).slice(0, 40);
     }
@@ -537,13 +561,68 @@ function openQuiz(quiz) {
     quizSession = {
         questions: extractQuizQuestions(quiz.content || ""),
         index: 0,
-        evaluated: false
+        evaluated: false,
+        results: []
     };
     document.getElementById("quiz-empty")?.classList.add("hidden");
     document.getElementById("quiz-view")?.classList.remove("hidden");
+    document.getElementById("quiz-history-panel")?.classList.remove("hidden");
     document.getElementById("quiz-view-title").textContent = quiz.title || "Quiz";
     renderQuizReveal();
     loadQuizzesList(quiz.id);
+    loadQuizAttempts(quiz.id);
+}
+
+async function loadQuizAttempts(quizId) {
+    const container = document.getElementById("quiz-history-panel");
+    if (!container) return;
+    container.innerHTML = `<h3 class="attempt-history-title">Performance History</h3><div class="eval-pending">Loading history...</div>`;
+
+    try {
+        const res = await authenticatedFetch(`/api/quizzes/${quizId}/attempts`);
+        if (!res.ok) {
+            container.innerHTML = `<h3 class="attempt-history-title">Performance History</h3><div class="eval-error">Could not load history.</div>`;
+            return;
+        }
+        const data = await res.json();
+        const attempts = data.attempts || [];
+
+        if (!attempts.length) {
+            container.innerHTML = `
+                <h3 class="attempt-history-title">Performance History</h3>
+                <div class="attempt-empty">No attempts yet. Answer questions above to build your history.</div>
+            `;
+            return;
+        }
+
+        // Group by question_index, keep latest attempt per question
+        const byQuestion = {};
+        attempts.forEach(a => {
+            const key = a.question_index;
+            if (!byQuestion[key]) byQuestion[key] = a;
+        });
+
+        const rows = Object.values(byQuestion).sort((a, b) => a.question_index - b.question_index);
+        const correct = rows.filter(r => r.correctness === "correct").length;
+        const total = rows.length;
+        const pct = total ? Math.round((correct / total) * 100) : 0;
+
+        container.innerHTML = `
+            <h3 class="attempt-history-title">Performance History</h3>
+            <div class="attempt-summary">
+                <span class="attempt-score">${correct}/${total}</span>
+                <span class="attempt-score-label">correct &nbsp;·&nbsp; ${pct}%</span>
+            </div>
+            ${rows.map(r => `
+                <div class="attempt-row verdict-${r.correctness}">
+                    <div class="attempt-q">Q${r.question_index}: ${escapeHtml((r.question || "").slice(0, 90))}${(r.question || "").length > 90 ? "…" : ""}</div>
+                    <div class="attempt-verdict">${escapeHtml(r.verdict || r.correctness.replaceAll("_", " "))}</div>
+                </div>
+            `).join("")}
+        `;
+    } catch (err) {
+        container.innerHTML = `<h3 class="attempt-history-title">Performance History</h3><div class="eval-error">Failed to load history.</div>`;
+    }
 }
 
 async function deleteSelectedQuiz() {
@@ -558,39 +637,41 @@ async function deleteSelectedQuiz() {
     }
 
     selectedQuiz = null;
-    quizSession = { questions: [], index: 0, evaluated: false };
+    quizSession = { questions: [], index: 0, evaluated: false, results: [] };
     document.getElementById("quiz-view")?.classList.add("hidden");
+    document.getElementById("quiz-history-panel")?.classList.add("hidden");
     document.getElementById("quiz-empty")?.classList.remove("hidden");
     await loadQuizzesList();
 }
 
 function goDeeperFromCourse(course, targetModules, allModules = null) {
-    const modules = allModules && allModules.length ? allModules : targetModules;
-    const moduleContext = (modules || []).map((m, idx) => (
-        `Module ${idx + 1}: ${m.title || "Untitled"}\n` +
-        `Date: ${m.task_date || "N/A"}\n` +
+    const focusModule = targetModules && targetModules.length === 1 ? targetModules[0] : null;
+    const focusTitle = focusModule
+        ? (focusModule.title || course.title || "this module")
+        : (course.title || "this course");
+
+    // Only send the target module as context — not all 14 modules
+    const moduleContext = (targetModules || []).map(m => (
+        `Title: ${m.title || "Untitled"}\n` +
+        `Day: ${m.day_index || "?"}\n` +
         `Lesson:\n${m.lesson_content || ""}\n\n` +
-        `Practice:\n${m.practice_content || ""}\n\n` +
+        `Practice tasks:\n${m.practice_content || ""}\n\n` +
         `Quick Quiz:\n${m.quiz_content || ""}`
     )).join("\n\n---\n\n");
 
-    const focusTitle = targetModules && targetModules.length === 1
-        ? (targetModules[0].title || course.title || "this module")
-        : (course.title || "this course");
-    const prompt = (
-        `Help me go deeper into ${focusTitle} using the Socratic method. ` +
-        `Ask one probing question at a time, evaluate my responses, and coach me for exam-ready answers.`
-    ).trim();
     const deepContext = (
-        `Course title: ${course.title || "Untitled course"}\n` +
-        `Course overview:\n${course.overview || ""}\n\n` +
-        `Course modules context:\n${moduleContext}`
+        `COURSE: ${course.title || "Untitled"}\n` +
+        `OVERVIEW: ${(course.overview || "").slice(0, 400)}\n\n` +
+        `MODULE TO TEACH:\n${moduleContext}`
     ).trim();
 
     localStorage.setItem(PLANNER_CHAT_DRAFT_KEY, JSON.stringify({
-        mode: "fundamentals",
-        message: prompt.slice(0, 1800),
-        extra_context: deepContext.slice(0, 20000)
+        mode: "deeper",
+        message: `Go deeper on: ${focusTitle}`,
+        extra_context: deepContext.slice(0, 15000),
+        deeper_course_id: course.id || null,
+        deeper_course_title: course.title || "Course",
+        deeper_module_title: focusTitle,
     }));
     window.location.href = "/chat";
 }

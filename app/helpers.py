@@ -17,6 +17,17 @@ def is_ssl_or_network_auth_error(err: Exception) -> bool:
         "connection reset",
         "temporarily unavailable",
         "name resolution",
+        # DNS / socket failures (e.g. Supabase paused or no internet)
+        "nodename nor servname",
+        "name or service not known",
+        "errno 8",
+        "errno 11001",
+        "getaddrinfo failed",
+        "network is unreachable",
+        "connection refused",
+        "connection timed out",
+        "timed out",
+        "socket",
     ]
     return any(marker in msg for marker in ssl_markers)
 

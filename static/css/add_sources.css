@@ -135,15 +135,18 @@
             position: absolute;
             top: 20px;
             right: 20px;
-            padding: 10px 16px;
-            font-size: 14px;
+            padding: 8px 16px;
+            font-size: 13px;
             cursor: pointer;
-            background-color: #007bff;
-            color: white;
-            border: none;
-            border-radius: 6px;
+            background: var(--card-bg);
+            color: var(--primary);
+            border: 1px solid #bfdbfe;
+            border-radius: 8px;
+            font-weight: 600;
+            transition: background 0.15s, color 0.15s;
         }
 
         .logout-btn:hover {
-            background-color: #0056b3;
+            background: var(--primary);
+            color: white;
         }

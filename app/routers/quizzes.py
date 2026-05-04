@@ -159,6 +159,25 @@ async def evaluate_quiz_answer(data: EvaluateQuizAnswerData, current_user=Depend
             improvements = []
         improvements = [str(item).strip()[:300] for item in improvements if str(item).strip()][:4]
 
+        # Persist attempt (non-fatal — evaluation still returns even if save fails)
+        if SUPABASE_AVAILABLE and supabase:
+            try:
+                supabase.table("quiz_attempts").insert({
+                    "user_id": current_user.id,
+                    "quiz_id": data.quiz_id,
+                    "quiz_title": quiz.get("title") or "Quiz",
+                    "question_index": data.question_index,
+                    "total_questions": data.total_questions,
+                    "question": data.question[:2000],
+                    "user_answer": data.user_answer[:2000],
+                    "correctness": correctness,
+                    "is_exam_acceptable": bool(parsed.get("is_exam_acceptable", False)),
+                    "verdict": str(parsed.get("verdict") or "").strip()[:240],
+                    "ideal_answer": str(parsed.get("ideal_answer") or "").strip()[:3000],
+                }).execute()
+            except Exception as attempt_err:
+                logger.warning(f"Failed to save quiz attempt (non-fatal): {attempt_err}")
+
         return {
             "success": True,
             "evaluation": {
@@ -178,6 +197,55 @@ async def evaluate_quiz_answer(data: EvaluateQuizAnswerData, current_user=Depend
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to evaluate answer"
         )
+
+
+@router.get("/api/quizzes/attempts/summary")
+async def get_quiz_attempts_summary(current_user=Depends(get_current_user)):
+    """Returns correctness breakdown + recent attempts for dashboard use."""
+    if not SUPABASE_AVAILABLE or not supabase:
+        return {"total": 0, "correct": 0, "partially_correct": 0, "incorrect": 0, "recent": []}
+    try:
+        rows = supabase.table("quiz_attempts").select(
+            "correctness, attempted_at, quiz_title"
+        ).eq("user_id", current_user.id).order("attempted_at", desc=True).limit(500).execute()
+        data = rows.data or []
+        total = len(data)
+        correct = sum(1 for r in data if r["correctness"] == "correct")
+        partial = sum(1 for r in data if r["correctness"] == "partially_correct")
+        incorrect = sum(1 for r in data if r["correctness"] == "incorrect")
+        return {
+            "total": total,
+            "correct": correct,
+            "partially_correct": partial,
+            "incorrect": incorrect,
+            "recent": data[:5],
+        }
+    except Exception as e:
+        logger.warning(f"Quiz attempts summary error (non-fatal): {e}")
+        return {"total": 0, "correct": 0, "partially_correct": 0, "incorrect": 0, "recent": []}
+
+
+@router.get("/api/quizzes/{quiz_id}/attempts")
+async def get_quiz_attempts(quiz_id: str, current_user=Depends(get_current_user)):
+    """Returns all attempt rows for a specific quiz."""
+    if not SUPABASE_AVAILABLE or not supabase:
+        return {"attempts": []}
+    try:
+        quiz_check = supabase.table("saved_quizzes").select("id").eq(
+            "user_id", current_user.id).eq("id", quiz_id).limit(1).execute()
+        if not quiz_check.data:
+            raise HTTPException(status_code=404, detail="Quiz not found")
+        rows = supabase.table("quiz_attempts").select(
+            "id, question_index, total_questions, question, user_answer, "
+            "correctness, is_exam_acceptable, verdict, ideal_answer, attempted_at"
+        ).eq("user_id", current_user.id).eq("quiz_id", quiz_id).order(
+            "attempted_at", desc=True).limit(200).execute()
+        return {"attempts": rows.data or []}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Get quiz attempts error: {e}")
+        return {"attempts": []}
 
 
 @router.get("/api/quizzes")

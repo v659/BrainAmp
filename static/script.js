@@ -829,6 +829,12 @@ function updateModeNotice() {
         return;
     }
 
+    if (currentChatMode === "deeper") {
+        notice.textContent = "Go Deeper mode. The AI will explain this module, then check your understanding with 2 questions.";
+        notice.style.color = "#7c3aed";
+        return;
+    }
+
     notice.textContent = "Fundamentals mode selected. Tutor will prioritize Socratic deep understanding.";
     notice.style.color = "#1d4ed8";
 }
@@ -842,10 +848,18 @@ function setChatMode(mode) {
     const quizOptions = document.getElementById("quiz-mode-options");
     if (courseOptions) courseOptions.style.display = mode === "course" ? "grid" : "none";
     if (quizOptions) quizOptions.style.display = mode === "quiz" ? "grid" : "none";
+    // Update collapsed pill label
+    const pill = document.getElementById("controls-mode-pill");
+    if (pill) {
+        const labels = { course: "Course Mode", quiz: "Quiz Mode", fundamentals: "Fundamentals", socratic: "Socratic", general: "General Study", deeper: "Go Deeper" };
+        pill.textContent = labels[mode] || "Settings";
+    }
+    // Re-expand controls when user switches mode (they may want to change settings)
+    const cw = document.querySelector(".chat-controls-wrap");
+    if (cw) cw.classList.remove("controls-collapsed");
 
-    document.querySelectorAll("[data-chat-mode]").forEach(btn => {
-        btn.style.borderColor = btn.dataset.chatMode === mode ? "#2563eb" : "#d1d5db";
-        btn.style.background = btn.dataset.chatMode === mode ? "#eff6ff" : "#fff";
+    document.querySelectorAll(".mode-btn[data-chat-mode]").forEach(btn => {
+        btn.classList.toggle("active", btn.dataset.chatMode === mode);
     });
 
     if (mode === "course") {
@@ -858,6 +872,9 @@ function setChatMode(mode) {
         loadAllChats();
     }
 }
+
+let deeperCourseId = null;
+let deeperAiMessageCount = 0;
 
 function consumeChatDraftIfAny() {
     try {
@@ -872,6 +889,16 @@ function consumeChatDraftIfAny() {
         }
         currentInjectedContext = String(draft.extra_context || "").trim() || null;
 
+        if (draft.deeper_course_id) {
+            deeperCourseId = draft.deeper_course_id;
+            deeperAiMessageCount = 0;
+            showDeeperSessionBanner(
+                draft.deeper_course_id,
+                draft.deeper_course_title,
+                draft.deeper_module_title
+            );
+        }
+
         const input = document.getElementById("chat-input");
         if (!input) return;
         input.value = String(draft.message || "").trim().slice(0, CONFIG.MAX_MESSAGE_LENGTH);
@@ -879,6 +906,36 @@ function consumeChatDraftIfAny() {
     } catch (err) {
         console.error("Consume chat draft error:", err);
     }
+}
+
+function showDeeperSessionBanner(courseId, courseTitle, moduleTitle) {
+    const scrollArea = document.getElementById("chat-scroll-area");
+    if (!scrollArea) return;
+    const existing = document.getElementById("deeper-session-banner");
+    if (existing) existing.remove();
+    const banner = document.createElement("div");
+    banner.id = "deeper-session-banner";
+    banner.className = "deeper-session-banner";
+    banner.innerHTML = `
+        <span class="deeper-banner-label">Go Deeper · <strong>${escapeHtml(moduleTitle || courseTitle || "Module")}</strong></span>
+        <a class="deeper-back-btn" href="/courses?course_id=${encodeURIComponent(courseId)}">← Back to Course</a>
+    `;
+    scrollArea.insertBefore(banner, scrollArea.firstChild);
+}
+
+function showDeeperContinueCard(courseId) {
+    const chatMessages = document.getElementById("chat-messages");
+    if (!chatMessages || document.getElementById("deeper-continue-card")) return;
+    const card = document.createElement("div");
+    card.id = "deeper-continue-card";
+    card.className = "deeper-continue-card";
+    card.innerHTML = `
+        <p class="deeper-continue-msg">You've completed this module! Ready to continue?</p>
+        <a class="deeper-continue-btn" href="/courses?course_id=${encodeURIComponent(courseId)}">Continue to next module →</a>
+    `;
+    chatMessages.appendChild(card);
+    const sa = document.getElementById("chat-scroll-area");
+    if (sa) sa.scrollTop = sa.scrollHeight;
 }
 
 function fmtIsoDate(dateObj = new Date()) {
@@ -937,14 +994,18 @@ function addLoadingMessage(label = "Working on your request...") {
     const card = document.createElement("div");
     card.className = "loading-message-card";
     card.innerHTML = `
-        <div class="loading-message-sender">AI Tutor</div>
-        <div class="loading-message-content">
-            <span>${label}</span>
-            <span class="typing-loader"><span></span><span></span><span></span></span>
+        <div class="loading-message-avatar">AI</div>
+        <div class="loading-message-bubble">
+            <div class="loading-message-sender">AI Tutor</div>
+            <div class="loading-message-content">
+                <span>${label}</span>
+                <span class="typing-loader"><span></span><span></span><span></span></span>
+            </div>
         </div>
     `;
     chatMessages.appendChild(card);
-    chatMessages.scrollTop = chatMessages.scrollHeight;
+    const _sa1 = document.getElementById("chat-scroll-area");
+    if (_sa1) _sa1.scrollTop = _sa1.scrollHeight;
     return card;
 }
 
@@ -1020,10 +1081,10 @@ async function loadSavedCourses() {
             time.textContent = course.created_at ? new Date(course.created_at).toLocaleString() : "Saved item";
 
             const actions = document.createElement("div");
-            actions.style.cssText = "display:flex;gap:8px;margin-top:8px;";
+            actions.className = "chat-item-actions";
             const viewBtn = document.createElement("button");
             viewBtn.textContent = "View";
-            viewBtn.style.cssText = "padding:4px 8px;border:none;border-radius:6px;background:#2563eb;color:#fff;cursor:pointer;font-size:12px;";
+            viewBtn.className = "chat-item-btn view";
             viewBtn.onclick = async () => {
                 try {
                     await showCourseInChat(course.id);
@@ -1068,11 +1129,11 @@ async function loadSavedQuizzes() {
             time.textContent = quiz.created_at ? new Date(quiz.created_at).toLocaleString() : "Saved item";
 
             const actions = document.createElement("div");
-            actions.style.cssText = "display:flex;gap:8px;margin-top:8px;";
+            actions.className = "chat-item-actions";
 
             const viewBtn = document.createElement("button");
             viewBtn.textContent = "View";
-            viewBtn.style.cssText = "padding:4px 8px;border:none;border-radius:6px;background:#2563eb;color:#fff;cursor:pointer;font-size:12px;";
+            viewBtn.className = "chat-item-btn view";
             viewBtn.onclick = () => {
                 clearChat();
                 addMessageToChat("Saved Quiz", quiz.content || "", false);
@@ -1080,7 +1141,7 @@ async function loadSavedQuizzes() {
 
             const deleteBtn = document.createElement("button");
             deleteBtn.textContent = "Delete";
-            deleteBtn.style.cssText = "padding:4px 8px;border:none;border-radius:6px;background:#dc2626;color:#fff;cursor:pointer;font-size:12px;";
+            deleteBtn.className = "chat-item-btn delete";
             deleteBtn.onclick = async () => {
                 const ok = confirm(`Delete saved quiz "${quiz.title || "item"}"?`);
                 if (!ok) return;
@@ -1132,33 +1193,58 @@ async function loadChatTopics() {
         container.innerHTML = "";
 
         const modeSelector = document.createElement("div");
-        modeSelector.style.cssText = "display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-bottom:14px;";
+        modeSelector.className = "mode-selector";
         modeSelector.innerHTML = `
-            <button data-chat-mode="general" style="border:1px solid #d1d5db;border-radius:10px;padding:12px;background:#fff;text-align:left;cursor:pointer;">
-                <strong>General Study</strong><br><span style="font-size:12px;color:#6b7280;">Brief explanations + open Q&A</span>
+            <button class="mode-btn" data-chat-mode="general">
+                <span class="mode-btn-icon">&#128218;</span>
+                <span class="mode-btn-title">General Study</span>
+                <span class="mode-btn-desc">Brief explanations + open Q&A</span>
             </button>
-            <button data-chat-mode="fundamentals" style="border:1px solid #d1d5db;border-radius:10px;padding:12px;background:#fff;text-align:left;cursor:pointer;">
-                <strong>Go Deeper (Fundamentals)</strong><br><span style="font-size:12px;color:#6b7280;">Socratic + guided reasoning</span>
+            <button class="mode-btn" data-chat-mode="fundamentals">
+                <span class="mode-btn-icon">&#129504;</span>
+                <span class="mode-btn-title">Go Deeper</span>
+                <span class="mode-btn-desc">Socratic + guided reasoning</span>
             </button>
-            <button data-chat-mode="course" style="border:1px solid #d1d5db;border-radius:10px;padding:12px;background:#fff;text-align:left;cursor:pointer;">
-                <strong>Generate Course</strong><br><span style="font-size:12px;color:#6b7280;">Build course from your notes</span>
+            <button class="mode-btn" data-chat-mode="course">
+                <span class="mode-btn-icon">&#128203;</span>
+                <span class="mode-btn-title">Generate Course</span>
+                <span class="mode-btn-desc">Build course from your notes</span>
             </button>
-            <button data-chat-mode="quiz" style="border:1px solid #d1d5db;border-radius:10px;padding:12px;background:#fff;text-align:left;cursor:pointer;">
-                <strong>Quiz Mode</strong><br><span style="font-size:12px;color:#6b7280;">Practice with generated quizzes</span>
+            <button class="mode-btn" data-chat-mode="quiz">
+                <span class="mode-btn-icon">&#9889;</span>
+                <span class="mode-btn-title">Quiz Mode</span>
+                <span class="mode-btn-desc">Practice with generated quizzes</span>
             </button>
         `;
-        container.appendChild(modeSelector);
+        // Single scrollable area containing both controls and messages
+        const scrollArea = document.createElement("div");
+        scrollArea.id = "chat-scroll-area";
+        scrollArea.className = "chat-scroll-area";
+        container.appendChild(scrollArea);
+
+        const controlsWrap = document.createElement("div");
+        controlsWrap.className = "chat-controls-wrap";
+
+        // Compact bar shown when controls are collapsed (after first message)
+        const toggleBar = document.createElement("div");
+        toggleBar.className = "controls-toggle-bar";
+        toggleBar.innerHTML = `<span class="controls-mode-pill" id="controls-mode-pill">Settings</span><span class="controls-toggle-hint">Tap to edit settings ▾</span>`;
+        toggleBar.onclick = () => controlsWrap.classList.remove("controls-collapsed");
+        controlsWrap.appendChild(toggleBar);
+
+        scrollArea.appendChild(controlsWrap);
+        controlsWrap.appendChild(modeSelector);
         modeSelector.querySelectorAll("[data-chat-mode]").forEach(btn => {
             btn.onclick = () => setChatMode(btn.dataset.chatMode);
         });
 
         const modeNotice = document.createElement("div");
         modeNotice.id = "mode-notice";
-        modeNotice.style.cssText = "margin-bottom:14px;padding:10px 12px;border:1px dashed #d1d5db;border-radius:8px;background:#fff;";
-        container.appendChild(modeNotice);
+        modeNotice.className = "mode-notice";
+        controlsWrap.appendChild(modeNotice);
 
         const modeOptionsWrap = document.createElement("div");
-        modeOptionsWrap.style.cssText = "display:grid;gap:12px;margin-bottom:14px;";
+        modeOptionsWrap.className = "mode-options-wrap";
         modeOptionsWrap.innerHTML = `
             <div id="course-mode-options" class="mode-options-panel" style="display:none;">
                 <label>Course title (optional)</label>
@@ -1191,18 +1277,11 @@ async function loadChatTopics() {
                 </div>
             </div>
         `;
-        container.appendChild(modeOptionsWrap);
+        controlsWrap.appendChild(modeOptionsWrap);
 
         const topicSelect = document.createElement("select");
         topicSelect.id = "topic-select";
-        topicSelect.style.cssText = `
-            width: 100%;
-            padding: 12px;
-            margin-bottom: 20px;
-            border-radius: 8px;
-            border: 1px solid #ddd;
-            font-size: 14px;
-        `;
+        topicSelect.className = "subject-select";
 
         const defaultOption = document.createElement("option");
         defaultOption.value = "";
@@ -1223,55 +1302,50 @@ async function loadChatTopics() {
             clearChat();
         };
 
-        container.appendChild(topicSelect);
+        controlsWrap.appendChild(topicSelect);
 
         const chatMessages = document.createElement("div");
         chatMessages.id = "chat-messages";
-        chatMessages.style.cssText = `
-            flex: 1;
-            overflow-y: auto;
-            padding: 20px;
-            background: white;
-            border-radius: 8px;
-            margin-bottom: 20px;
-        `;
+        chatMessages.className = "chat-messages";
 
         const chatInputContainer = document.createElement("div");
-        chatInputContainer.style.cssText = `display: flex; gap: 10px;`;
+        chatInputContainer.className = "chat-input-container";
 
         const chatInput = document.createElement("textarea");
         chatInput.id = "chat-input";
+        chatInput.className = "chat-input";
         chatInput.maxLength = CONFIG.MAX_MESSAGE_LENGTH;
-        chatInput.style.cssText = `
-            flex: 1;
-            padding: 12px;
-            border-radius: 8px;
-            border: 1px solid #ddd;
-            font-size: 14px;
-            resize: vertical;
-            min-height: 60px;
-            max-height: 200px;
-        `;
+        chatInput.rows = 1;
+        chatInput.addEventListener("keydown", (e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+        chatInput.addEventListener("input", () => {
+            chatInput.style.height = "auto";
+            chatInput.style.height = Math.min(chatInput.scrollHeight, 160) + "px";
+        });
 
         const sendButton = document.createElement("button");
         sendButton.id = "chat-send-button";
-        sendButton.textContent = "Send";
+        sendButton.className = "chat-send-btn";
+        sendButton.innerHTML = `Send <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>`;
         sendButton.onclick = sendMessage;
-        sendButton.style.cssText = `
-            padding: 12px 24px;
-            background: #007bff;
-            color: white;
-            border: none;
-            border-radius: 8px;
-            cursor: pointer;
-            font-size: 14px;
-        `;
 
         chatInputContainer.appendChild(chatInput);
         chatInputContainer.appendChild(sendButton);
 
-        container.appendChild(chatMessages);
-        container.appendChild(chatInputContainer);
+        const inputWrapper = document.createElement("div");
+        inputWrapper.style.cssText = "flex-shrink:0;";
+        inputWrapper.appendChild(chatInputContainer);
+        const inputHint = document.createElement("div");
+        inputHint.className = "chat-input-hint";
+        inputHint.textContent = "Press Enter to send, Shift+Enter for new line";
+        inputWrapper.appendChild(inputHint);
+
+        scrollArea.appendChild(chatMessages);
+        container.appendChild(inputWrapper);
 
         currentChatMode = null;
         switchActiveSidebar("fundamentals");
@@ -1292,45 +1366,61 @@ function clearChat() {
     if (chatMessages) {
         chatMessages.innerHTML = "";
     }
+    // Re-expand settings so user can configure new chat
+    const cw = document.querySelector(".chat-controls-wrap");
+    if (cw) cw.classList.remove("controls-collapsed");
+    // Clear deeper session state
+    deeperCourseId = null;
+    deeperAiMessageCount = 0;
+    const banner = document.getElementById("deeper-session-banner");
+    if (banner) banner.remove();
 }
 
 function addMessageToChat(sender, message, isUser) {
     const chatMessages = document.getElementById("chat-messages");
     if (!chatMessages) return;
 
-    const messageDiv = document.createElement("div");
-    messageDiv.style.cssText = `
-        margin-bottom: 16px;
-        padding: 12px;
-        border-radius: 8px;
-        background: ${isUser ? '#e3f2fd' : '#f5f5f5'};
-        ${isUser ? 'margin-left: 20%;' : 'margin-right: 20%;'}
-    `;
+    const row = document.createElement("div");
+    row.className = `msg-row ${isUser ? "user" : "ai"}`;
+
+    const avatar = document.createElement("div");
+    avatar.className = "msg-avatar";
+    avatar.textContent = isUser ? "Y" : "AI";
+
+    const bubble = document.createElement("div");
+    bubble.className = "msg-bubble";
 
     const senderDiv = document.createElement("div");
+    senderDiv.className = "msg-sender";
     senderDiv.textContent = sender;
-    senderDiv.style.cssText = `
-        font-weight: 600;
-        margin-bottom: 6px;
-        color: ${isUser ? '#1976d2' : '#666'};
-    `;
 
     const contentDiv = document.createElement("div");
-    contentDiv.style.cssText = `
-        white-space: pre-wrap;
-        word-wrap: break-word;
-        line-height: 1.5;
-    `;
+    contentDiv.className = "msg-content";
     if (isUser) {
         contentDiv.textContent = message;
     } else {
         contentDiv.innerHTML = renderMarkdown(message);
     }
 
-    messageDiv.appendChild(senderDiv);
-    messageDiv.appendChild(contentDiv);
-    chatMessages.appendChild(messageDiv);
-    chatMessages.scrollTop = chatMessages.scrollHeight;
+    bubble.appendChild(senderDiv);
+    bubble.appendChild(contentDiv);
+    row.appendChild(avatar);
+    row.appendChild(bubble);
+    chatMessages.appendChild(row);
+    // Collapse the settings panel on first message so chat has full space
+    const cw = document.querySelector(".chat-controls-wrap");
+    if (cw && !cw.classList.contains("controls-collapsed")) {
+        cw.classList.add("controls-collapsed");
+    }
+    // Track AI messages in a deeper session — show "Continue" card after 3 AI turns
+    if (!isUser && deeperCourseId) {
+        deeperAiMessageCount++;
+        if (deeperAiMessageCount >= 3) {
+            showDeeperContinueCard(deeperCourseId);
+        }
+    }
+    const _sa2 = document.getElementById("chat-scroll-area");
+    if (_sa2) _sa2.scrollTop = _sa2.scrollHeight;
 }
 
 function showModeBlockingNotice(message) {
@@ -1743,34 +1833,69 @@ async function loadDashboardStats() {
     if (!token) return;
 
     try {
-        const [topicsRes, statsRes] = await Promise.all([
-            authenticatedFetch("/api/chat/topics"),
-            authenticatedFetch("/api/dashboard/stats")
-        ]);
+        const res = await authenticatedFetch("/api/dashboard/stats");
+        if (!res.ok) {
+            renderDashboardActivity([]);
+            return;
+        }
+        const data = await res.json();
 
-        if (topicsRes.ok) {
-            const topicsData = await topicsRes.json();
-            const count = topicsData.topics?.length || 0;
+        // Remove skeleton pulse once data arrives
+        document.querySelectorAll(".skeleton-card").forEach(el => el.classList.remove("skeleton-card"));
+        document.querySelectorAll(".skeleton-num").forEach(el => el.classList.remove("skeleton-num"));
 
-            const docCount = document.getElementById("doc-count");
-            const topicCount = document.getElementById("topic-count");
+        const docCount = document.getElementById("doc-count");
+        const topicCount = document.getElementById("topic-count");
+        const chatCount = document.getElementById("chat-count");
+        const weekCount = document.getElementById("week-count");
 
-            if (docCount) docCount.textContent = count;
-            if (topicCount) topicCount.textContent = count;
+        if (docCount) docCount.textContent = data.doc_count ?? 0;
+        if (topicCount) topicCount.textContent = data.topic_count ?? 0;
+        if (chatCount) chatCount.textContent = data.chat_count ?? 0;
+        if (weekCount) weekCount.textContent = data.week_count ?? 0;
+
+        // Show onboarding banner for new users
+        if (data.is_new_user) {
+            const banner = document.getElementById("onboarding-banner");
+            if (banner) banner.classList.remove("hidden");
         }
 
-        if (statsRes.ok) {
-            const statsData = await statsRes.json();
-
-            const chatCount = document.getElementById("chat-count");
-            const weekCount = document.getElementById("week-count");
-
-            if (chatCount) chatCount.textContent = statsData.chat_count || 0;
-            if (weekCount) weekCount.textContent = statsData.week_count || 0;
-        }
+        renderDashboardActivity(data.activity || []);
     } catch (err) {
         console.error("Load stats error:", err);
+        renderDashboardActivity([]);
     }
+}
+
+function renderDashboardActivity(items) {
+    const list = document.getElementById("activity-list");
+    if (!list) return;
+
+    if (!items.length) {
+        list.innerHTML = `
+            <div class="activity-item">
+                <div class="activity-title">No activity yet</div>
+                <div class="activity-time">Upload a document or start a chat to begin</div>
+            </div>
+        `;
+        return;
+    }
+
+    const icons = { document: "📄", chat: "💬", quiz: "⚡" };
+
+    list.innerHTML = items.map(item => {
+        const icon = icons[item.type] || "•";
+        const timeStr = item.time
+            ? new Date(item.time).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
+            : "";
+        return `
+            <div class="activity-item activity-type-${sanitizeInput(item.type)}">
+                <div class="activity-title">${icon} ${sanitizeInput(item.title)}</div>
+                ${item.subtitle ? `<div class="activity-subtitle">${sanitizeInput(item.subtitle)}</div>` : ""}
+                <div class="activity-time">${timeStr}</div>
+            </div>
+        `;
+    }).join("");
 }
 
 // Sidebar Functions
@@ -1852,15 +1977,7 @@ async function loadAllChats() {
 
             const deleteBtn = document.createElement("button");
             deleteBtn.textContent = "Delete";
-            deleteBtn.style.cssText = `
-                border:none;
-                border-radius:6px;
-                background:#dc2626;
-                color:#fff;
-                cursor:pointer;
-                font-size:11px;
-                padding:4px 8px;
-            `;
+            deleteBtn.className = "chat-item-btn delete";
             deleteBtn.onclick = async (e) => {
                 e.stopPropagation();
                 await deleteChat(chat.chat_id, displayTitle);
